@@ -1,20 +1,25 @@
 import asyncio
 import logging
+import os
 import sqlite3
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 
 # ================= CONFIG =================
 
-TOKEN = "8971928670:AAFroU0mYxWujdVw4p67WtC-2xY1EvzTlNY"
+TOKEN = "PASTE_YOUR_TOKEN_HERE"
 
-OWNERS = {
-    6279994177,
-    5857555465
-}
+OWNERS = {6279994177, 5857555465}
 
-# ================= BOT INIT =================
+BASE_URL = "https://YOUR-RENDER-URL.onrender.com"
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = "secret123"
+
+PORT = int(os.getenv("PORT", 10000))
+
+# ================= INIT =================
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -43,24 +48,21 @@ conn.commit()
 
 # ================= HELPERS =================
 
-def is_owner(user_id: int) -> bool:
-    return user_id in OWNERS
+def is_owner(uid: int):
+    return uid in OWNERS
 
-def add_user(user_id: int):
-    cursor.execute(
-        "INSERT OR IGNORE INTO users(user_id) VALUES (?)",
-        (user_id,)
-    )
+def add_user(uid: int):
+    cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (uid,))
     conn.commit()
 
-# ================= START =================
+# ================= COMMANDS =================
 
 @dp.message(F.text == "/start")
 async def start(m: Message):
     add_user(m.from_user.id)
-    await m.answer("👋 Привет! Бот турниров активирован")
+    await m.answer("🤖 Bot V4 webhook online")
 
-# ================= CREATE TOURNAMENT =================
+# -------- CREATE TOURNAMENT --------
 
 @dp.message(F.text.startswith("/create"))
 async def create(m: Message):
@@ -73,63 +75,48 @@ async def create(m: Message):
 
     number = int(parts[1])
 
-    cursor.execute(
-        "INSERT OR IGNORE INTO tournaments(number) VALUES (?)",
-        (number,)
-    )
+    cursor.execute("INSERT OR IGNORE INTO tournaments(number) VALUES (?)", (number,))
     conn.commit()
 
     await m.answer(f"✅ Турнир {number} создан")
 
-# ================= LIST =================
+# -------- LIST --------
 
 @dp.message(F.text == "/list")
-async def list_tours(m: Message):
+async def list_t(m: Message):
     if not is_owner(m.from_user.id):
         return
 
-    tours = cursor.execute(
-        "SELECT number, price, card, room FROM tournaments"
-    ).fetchall()
+    data = cursor.execute("SELECT number, price, card, room FROM tournaments").fetchall()
 
-    if not tours:
-        return await m.answer("❌ Турниров нет")
+    if not data:
+        return await m.answer("❌ Нет турниров")
 
     text = "📋 Турниры:\n\n"
 
-    for t in tours:
-        text += (
-            f"🎮 {t[0]}\n"
-            f"💰 {t[1]}\n"
-            f"💳 {t[2]}\n"
-            f"🎮 {t[3]}\n\n"
-        )
+    for t in data:
+        text += f"🎮 {t[0]}\n💰 {t[1]}\n💳 {t[2]}\n🎮 {t[3]}\n\n"
 
     await m.answer(text)
 
-# ================= PRICE =================
+# -------- PRICE --------
 
 @dp.message(F.text.startswith("/price"))
 async def price(m: Message):
     if not is_owner(m.from_user.id):
         return
 
-    parts = m.text.split()
-    if len(parts) < 3:
-        return await m.answer("Формат: /price 1 100")
-
-    number = int(parts[1])
-    value = int(parts[2])
+    _, number, value = m.text.split()
 
     cursor.execute(
         "UPDATE tournaments SET price=? WHERE number=?",
-        (value, number)
+        (int(value), int(number))
     )
     conn.commit()
 
     await m.answer("💰 Цена обновлена")
 
-# ================= CARD =================
+# -------- CARD --------
 
 @dp.message(F.text.startswith("/card"))
 async def card(m: Message):
@@ -137,9 +124,6 @@ async def card(m: Message):
         return
 
     parts = m.text.split(maxsplit=2)
-    if len(parts) < 3:
-        return await m.answer("Формат: /card 1 текст")
-
     number = int(parts[1])
     value = parts[2]
 
@@ -151,7 +135,7 @@ async def card(m: Message):
 
     await m.answer("💳 Карта обновлена")
 
-# ================= ROOM =================
+# -------- ROOM --------
 
 @dp.message(F.text.startswith("/room"))
 async def room(m: Message):
@@ -159,9 +143,6 @@ async def room(m: Message):
         return
 
     parts = m.text.split(maxsplit=2)
-    if len(parts) < 3:
-        return await m.answer("Формат: /room 1 ссылка")
-
     number = int(parts[1])
     link = parts[2]
 
@@ -173,18 +154,14 @@ async def room(m: Message):
 
     await m.answer("🎮 Комната обновлена")
 
-# ================= SEND =================
+# -------- SEND (BROADCAST) --------
 
 @dp.message(F.text.startswith("/send"))
 async def send_all(m: Message):
     if not is_owner(m.from_user.id):
         return
 
-    parts = m.text.split(maxsplit=1)
-    if len(parts) < 2:
-        return await m.answer("Формат: /send текст")
-
-    text = parts[1]
+    text = m.text.replace("/send", "").strip()
 
     users = cursor.execute("SELECT user_id FROM users").fetchall()
 
@@ -196,17 +173,45 @@ async def send_all(m: Message):
 
     await m.answer("📢 Рассылка отправлена")
 
-# ================= FALLBACK =================
+# ================= WEBHOOK =================
 
-@dp.message()
-async def fallback(m: Message):
-    await m.answer("❓ Неизвестная команда")
+async def handle(request):
+    data = await request.json()
 
-# ================= MAIN =================
+    update = dp.update.model_validate(data)
+    await dp.feed_update(bot, update)
+
+    return web.Response(text="ok")
+
+async def health(request):
+    return web.Response(text="bot alive")
+
+async def on_startup():
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(f"{BASE_URL}{WEBHOOK_PATH}", secret_token=WEBHOOK_SECRET)
+
+# ================= APP =================
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
+
+    app = web.Application()
+
+    app.router.add_post(WEBHOOK_PATH, handle)
+    app.router.add_get("/", health)
+
+    await on_startup()
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    print("BOT RUNNING (V4 WEBHOOK)")
+
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
