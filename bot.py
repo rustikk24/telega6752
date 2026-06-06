@@ -4,7 +4,6 @@ import sqlite3
 import os
 
 from aiohttp import web
-
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, Update
 from aiogram.filters import CommandStart
@@ -12,7 +11,7 @@ from aiogram.filters import CommandStart
 # ================= CONFIG =================
 
 TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://xxx.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 10000))
 WEBHOOK_PATH = "/webhook"
 
@@ -54,15 +53,20 @@ CREATE TABLE IF NOT EXISTS tournaments (
 
 conn.commit()
 
+# ================= HOME (FIX 404) =================
+
+async def home(request):
+    return web.Response(text="Bot is running")
+
 # ================= START =================
 
 @dp.message(CommandStart())
 async def start(m: Message):
     cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
     conn.commit()
-    await m.answer("👋 Бот турниров онлайн")
+    await m.answer("👋 Бот турниров работает")
 
-# ================= TOURNAMENT CREATE =================
+# ================= TOURNAMENT CREATE FLOW =================
 
 tour_state = {}
 
@@ -153,7 +157,7 @@ async def join(m: Message):
         f"🚪 Комната: {room}"
     )
 
-# ================= PRICE =================
+# ================= ADMIN COMMANDS =================
 
 @dp.message(F.text.startswith("/price"))
 async def price(m: Message):
@@ -168,8 +172,6 @@ async def price(m: Message):
     except:
         await m.answer("Формат: /price 1 100")
 
-# ================= CARD =================
-
 @dp.message(F.text.startswith("/card"))
 async def card(m: Message):
     if not is_admin(m.from_user.id):
@@ -183,8 +185,6 @@ async def card(m: Message):
     except:
         await m.answer("Формат: /card 1 текст")
 
-# ================= ROOM =================
-
 @dp.message(F.text.startswith("/room"))
 async def room(m: Message):
     if not is_admin(m.from_user.id):
@@ -197,8 +197,6 @@ async def room(m: Message):
         await m.answer("🎮 Комната обновлена")
     except:
         await m.answer("Формат: /room 1 ссылка")
-
-# ================= SEND =================
 
 @dp.message(F.text.startswith("/send"))
 async def send_all(m: Message):
@@ -217,13 +215,15 @@ async def send_all(m: Message):
 
     await m.answer("📢 Рассылка отправлена")
 
-# ================= WEBHOOK =================
+# ================= WEBHOOK HANDLER =================
 
 async def handle(request: web.Request):
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
     return web.Response()
+
+# ================= STARTUP =================
 
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL + WEBHOOK_PATH)
@@ -233,14 +233,20 @@ async def on_shutdown(app):
     await bot.delete_webhook()
     await bot.session.close()
 
+# ================= APP =================
+
 def create_app():
     app = web.Application()
+
     app.router.add_post(WEBHOOK_PATH, handle)
+    app.router.add_get("/", home)
+
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
+
     return app
 
-# ================= MAIN =================
+# ================= RUN =================
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
