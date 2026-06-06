@@ -1,24 +1,20 @@
 import asyncio
 import logging
 import sqlite3
-import os
-
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, Update
-from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
 # ================= CONFIG =================
 
-TOKEN = os.getenv("BOT_TOKEN")  # В Render → Environment Variables
+TOKEN = "PASTE_YOUR_TOKEN_HERE"
 WEBHOOK_PATH = "/webhook"
-BASE_URL = os.getenv("BASE_URL")  # например https://xxxx.onrender.com
+BASE_URL = "https://YOUR-RENDER-URL.onrender.com"
 
-OWNERS = [123456789, 987654321]  # <-- поставь свои 2 ID
-
-# ================= BOT =================
+WEBHOOK_URL = BASE_URL + WEBHOOK_PATH
 
 bot = Bot(
     token=TOKEN,
@@ -29,8 +25,14 @@ dp = Dispatcher()
 
 # ================= DB =================
 
-conn = sqlite3.connect("bot.db")
+conn = sqlite3.connect("db.sqlite3")
 cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY
+)
+""")
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tournaments (
@@ -41,42 +43,39 @@ CREATE TABLE IF NOT EXISTS tournaments (
 )
 """)
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY
-)
-""")
 conn.commit()
 
-# ================= HELPERS =================
+# ================= OWNER =================
 
-def is_owner(user_id: int):
+OWNERS = {123456789, 987654321}  # <- замени на свои ID
+
+def is_owner(user_id: int) -> bool:
     return user_id in OWNERS
 
-# ================= START =================
+# ================= COMMANDS =================
 
 @dp.message(F.text == "/start")
 async def start(m: Message):
     cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (m.from_user.id,))
     conn.commit()
-    await m.answer("👋 Бот работает")
+    await m.answer("Привет! Бот работает ✅")
 
-# ================= LIST =================
+# ---------- LIST ----------
 
 @dp.message(F.text.startswith("/list"))
 async def list_tournaments(m: Message):
     rows = cursor.execute("SELECT number, price FROM tournaments").fetchall()
 
     if not rows:
-        return await m.answer("❌ Турниров нет")
+        return await m.answer("Турниров нет")
 
-    text = "📋 Турниры:\n\n"
+    text = "🎮 Турниры:\n\n"
     for r in rows:
-        text += f"#{r[0]} — {r[1]}₽\n"
+        text += f"№{r[0]} — {r[1]}₽\n"
 
     await m.answer(text)
 
-# ================= JOIN =================
+# ---------- JOIN ----------
 
 @dp.message(F.text.startswith("/join"))
 async def join(m: Message):
@@ -93,7 +92,7 @@ async def join(m: Message):
     ).fetchone()
 
     if not tour:
-        return await m.answer("❌ Турнир не найден")
+        return await m.answer("Турнир не найден")
 
     price, card, room = tour
 
@@ -101,52 +100,29 @@ async def join(m: Message):
     conn.commit()
 
     await m.answer(
-        f"💰 Цена: {price}\n"
+        f"💰 Цена: {price}₽\n"
         f"💳 Карта: {card}\n"
         f"🎮 Комната: {room}"
     )
 
-# ================= CREATE =================
-
-@dp.message(F.text.startswith("/create"))
-async def create(m: Message):
-    if not is_owner(m.from_user.id):
-        return
-
-    parts = m.text.split()
-
-    if len(parts) < 3:
-        return await m.answer("Формат: /create 1 100")
-
-    number = int(parts[1])
-    price = int(parts[2])
-
-    cursor.execute(
-        "INSERT OR REPLACE INTO tournaments(number, price, card, room) VALUES (?, ?, '', '')",
-        (number, price)
-    )
-    conn.commit()
-
-    await m.answer("✅ Турнир создан")
-
-# ================= PRICE =================
+# ---------- PRICE ----------
 
 @dp.message(F.text.startswith("/price"))
 async def price(m: Message):
     if not is_owner(m.from_user.id):
         return
 
-    parts = m.text.split()
+    _, number, value = m.text.split()
 
-    number = int(parts[1])
-    value = int(parts[2])
-
-    cursor.execute("UPDATE tournaments SET price=? WHERE number=?", (value, number))
+    cursor.execute(
+        "UPDATE tournaments SET price=? WHERE number=?",
+        (int(value), int(number))
+    )
     conn.commit()
 
     await m.answer("💰 Цена обновлена")
 
-# ================= CARD =================
+# ---------- CARD ----------
 
 @dp.message(F.text.startswith("/card"))
 async def card(m: Message):
@@ -158,12 +134,15 @@ async def card(m: Message):
     number = int(parts[1])
     value = parts[2]
 
-    cursor.execute("UPDATE tournaments SET card=? WHERE number=?", (value, number))
+    cursor.execute(
+        "UPDATE tournaments SET card=? WHERE number=?",
+        (value, number)
+    )
     conn.commit()
 
     await m.answer("💳 Карта обновлена")
 
-# ================= ROOM =================
+# ---------- ROOM ----------
 
 @dp.message(F.text.startswith("/room"))
 async def room(m: Message):
@@ -175,12 +154,15 @@ async def room(m: Message):
     number = int(parts[1])
     link = parts[2]
 
-    cursor.execute("UPDATE tournaments SET room=? WHERE number=?", (link, number))
+    cursor.execute(
+        "UPDATE tournaments SET room=? WHERE number=?",
+        (link, number)
+    )
     conn.commit()
 
     await m.answer("🎮 Комната обновлена")
 
-# ================= SEND =================
+# ---------- SEND ----------
 
 @dp.message(F.text.startswith("/send"))
 async def send_all(m: Message):
@@ -201,30 +183,28 @@ async def send_all(m: Message):
 
 # ================= WEBHOOK =================
 
-async def webhook_handler(request: web.Request):
+async def handle(request):
     data = await request.json()
-
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
-
-    return web.Response(text="OK")
+    return web.Response()
 
 async def on_startup(app):
-    await bot.set_webhook(f"{BASE_URL}{WEBHOOK_PATH}")
+    await bot.set_webhook(WEBHOOK_URL)
     logging.info("Webhook set")
 
-# ================= APP =================
+async def on_shutdown(app):
+    await bot.delete_webhook()
+    await bot.session.close()
 
-def create_app():
-    app = web.Application()
-    app.router.add_post(WEBHOOK_PATH, webhook_handler)
-    app.on_startup.append(on_startup)
-    return app
+app = web.Application()
+app.router.add_post(WEBHOOK_PATH, handle)
 
-# ================= RUN =================
+app.on_startup.append(on_startup)
+app.on_shutdown.append(on_shutdown)
+
+# ================= MAIN =================
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-
-    app = create_app()
-    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    web.run_app(app, host="0.0.0.0", port=10000)
