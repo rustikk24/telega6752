@@ -4,19 +4,22 @@ import os
 import sqlite3
 
 from aiohttp import web
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, Update
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
+
 # ================= ENV =================
 
 TOKEN = os.getenv("BOT_TOKEN")
-BASE_URL = os.getenv("BASE_URL")  # https://your-app.onrender.com
-OWNERS = set(map(int, filter(str.isdigit, os.getenv("OWNERS", "").split(","))))
+BASE_URL = os.getenv("BASE_URL")
+OWNERS = set(map(int, os.getenv("OWNERS", "").split(","))) if os.getenv("OWNERS") else set()
 
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = BASE_URL + WEBHOOK_PATH
+
 
 # ================= BOT =================
 
@@ -27,9 +30,10 @@ bot = Bot(
 
 dp = Dispatcher()
 
+
 # ================= DB =================
 
-conn = sqlite3.connect("db.sqlite3", check_same_thread=False)
+conn = sqlite3.connect("db.sqlite3")
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -41,106 +45,97 @@ CREATE TABLE IF NOT EXISTS users (
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tournaments (
     number INTEGER PRIMARY KEY,
-    price INTEGER DEFAULT 0,
-    card TEXT DEFAULT '',
-    room TEXT DEFAULT ''
+    price INTEGER,
+    card TEXT,
+    room TEXT
 )
 """)
 
 conn.commit()
+
 
 # ================= HELPERS =================
 
 def is_owner(user_id: int) -> bool:
     return user_id in OWNERS
 
-def safe_int(x):
-    try:
-        return int(x)
-    except:
-        return None
 
-# ================= COMMANDS =================
+# ================= USER COMMANDS =================
 
 @dp.message(F.text == "/start")
 async def start(m: Message):
-    cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
+    cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (m.from_user.id,))
     conn.commit()
-    await m.answer("🤖 Бот работает")
 
-# ---------- LIST ----------
+    await m.answer("🤖 Бот активен")
+
 
 @dp.message(F.text.startswith("/list"))
-async def list_t(m: Message):
+async def list_tournaments(m: Message):
     rows = cursor.execute("SELECT number, price FROM tournaments").fetchall()
 
     if not rows:
         return await m.answer("Турниров нет")
 
     text = "🎮 Турниры:\n\n"
-    for n, p in rows:
-        text += f"#{n} — {p}₽\n"
+    for r in rows:
+        text += f"#{r[0]} — {r[1]}₽\n"
 
     await m.answer(text)
 
-# ---------- JOIN ----------
 
 @dp.message(F.text.startswith("/join"))
 async def join(m: Message):
     parts = m.text.split()
 
     if len(parts) < 2:
-        return await m.answer("Формат: /join 1")
+        return await m.answer("Используй: /join 1")
 
-    number = safe_int(parts[1])
-    if number is None:
-        return await m.answer("Неверный номер")
+    number = int(parts[1])
 
     tour = cursor.execute(
-        "SELECT price, card, room FROM tournaments WHERE number=?",
+        "SELECT price, card FROM tournaments WHERE number=?",
         (number,)
     ).fetchone()
 
     if not tour:
         return await m.answer("Турнир не найден")
 
-    price, card, room = tour
+    price, card = tour
 
-    cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
+    cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (m.from_user.id,))
     conn.commit()
 
     await m.answer(
         f"💰 Цена: {price}\n"
-        f"💳 Карта: {card}\n"
-        f"🎮 Комната: {room}"
+        f"💳 Карта: {card}\n\n"
+        f"📌 После оплаты вы получите руму"
     )
 
-# ---------- PRICE ----------
 
-@dp.message(F.text.startswith("/price"))
-async def price(m: Message):
+# ================= OWNER COMMANDS =================
+
+@dp.message(F.text.startswith("/create"))
+async def create(m: Message):
     if not is_owner(m.from_user.id):
         return
 
-    parts = m.text.split()
+    parts = m.text.split(maxsplit=2)
+
     if len(parts) < 3:
-        return await m.answer("Формат: /price 1 100")
+        return await m.answer("Формат: /create 1 100")
 
-    number = safe_int(parts[1])
-    value = safe_int(parts[2])
-
-    if None in (number, value):
-        return await m.answer("Ошибка данных")
+    number = int(parts[1])
+    price = int(parts[2])
 
     cursor.execute(
-        "UPDATE tournaments SET price=? WHERE number=?",
-        (value, number)
+        "INSERT OR REPLACE INTO tournaments (number, price, card, room) VALUES (?, ?, ?, ?)",
+        (number, price, "", "")
     )
     conn.commit()
 
-    await m.answer("💰 Обновлено")
+    await m.answer(f"🎮 Турнир #{number} создан")
 
-# ---------- CARD ----------
 
 @dp.message(F.text.startswith("/card"))
 async def card(m: Message):
@@ -148,21 +143,31 @@ async def card(m: Message):
         return
 
     parts = m.text.split(maxsplit=2)
-    if len(parts) < 3:
-        return await m.answer("Формат: /card 1 text")
 
-    number = safe_int(parts[1])
+    number = int(parts[1])
     value = parts[2]
 
+    cursor.execute("UPDATE tournaments SET card=? WHERE number=?", (value, number))
+    conn.commit()
+
+    await m.answer("💳 Карта обновлена")
+
+
+@dp.message(F.text.startswith("/price"))
+async def price(m: Message):
+    if not is_owner(m.from_user.id):
+        return
+
+    _, number, value = m.text.split()
+
     cursor.execute(
-        "UPDATE tournaments SET card=? WHERE number=?",
-        (value, number)
+        "UPDATE tournaments SET price=? WHERE number=?",
+        (int(value), int(number))
     )
     conn.commit()
 
-    await m.answer("💳 Обновлено")
+    await m.answer("💰 Цена обновлена")
 
-# ---------- ROOM ----------
 
 @dp.message(F.text.startswith("/room"))
 async def room(m: Message):
@@ -170,21 +175,41 @@ async def room(m: Message):
         return
 
     parts = m.text.split(maxsplit=2)
-    if len(parts) < 3:
-        return await m.answer("Формат: /room 1 link")
 
-    number = safe_int(parts[1])
+    number = int(parts[1])
     link = parts[2]
 
-    cursor.execute(
-        "UPDATE tournaments SET room=? WHERE number=?",
-        (link, number)
-    )
+    cursor.execute("UPDATE tournaments SET room=? WHERE number=?", (link, number))
     conn.commit()
 
-    await m.answer("🎮 Обновлено")
+    await m.answer("🎮 Рума сохранена (скрыта)")
 
-# ---------- SEND ----------
+
+@dp.message(F.text.startswith("/give"))
+async def give_room(m: Message):
+    if not is_owner(m.from_user.id):
+        return
+
+    parts = m.text.split()
+
+    if len(parts) < 3:
+        return await m.answer("Формат: /give user_id 1")
+
+    user_id = int(parts[1])
+    number = int(parts[2])
+
+    tour = cursor.execute(
+        "SELECT room FROM tournaments WHERE number=?",
+        (number,)
+    ).fetchone()
+
+    if not tour or not tour[0]:
+        return await m.answer("Рума не найдена")
+
+    await bot.send_message(user_id, f"🎮 Ваша румa:\n\n{tour[0]}")
+
+    await m.answer("✅ Рума отправлена")
+
 
 @dp.message(F.text.startswith("/send"))
 async def send_all(m: Message):
@@ -195,29 +220,21 @@ async def send_all(m: Message):
 
     users = cursor.execute("SELECT user_id FROM users").fetchall()
 
-    for (uid,) in users:
+    for u in users:
         try:
-            await bot.send_message(uid, text)
+            await bot.send_message(u[0], text)
         except:
             pass
 
-    await m.answer("📢 Отправлено")
+    await m.answer("📢 Рассылка отправлена")
 
-# ---------- DEBUG ----------
-
-@dp.message(F.text == "/debug")
-async def debug(m: Message):
-    await m.answer("бот работает ✅")
 
 # ================= WEBHOOK =================
 
 async def handle(request):
     try:
         data = await request.json()
-
-        print("UPDATE:", data)
-
-        update = Update(**data)
+        update = Update.model_validate(data)
 
         await dp.feed_update(bot, update)
 
@@ -227,19 +244,23 @@ async def handle(request):
         print("WEBHOOK ERROR:", e)
         return web.Response(text="error", status=500)
 
+
 async def on_startup(app):
-    await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     print("Webhook set:", WEBHOOK_URL)
 
+
 async def on_shutdown(app):
+    await bot.delete_webhook()
     await bot.session.close()
+
 
 app = web.Application()
 app.router.add_post("/webhook", handle)
 
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
+
 
 # ================= MAIN =================
 
