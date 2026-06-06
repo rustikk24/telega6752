@@ -197,14 +197,14 @@ async def handle(request):
 
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
-    logging.info("Webhook set")
+    print("Webhook set:", WEBHOOK_URL)
 
 async def on_shutdown(app):
     await bot.delete_webhook()
     await bot.session.close()
 
 app = web.Application()
-app.router.add_post(WEBHOOK_PATH, handle)
+app.router.add_post("/webhook", handle)
 
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
