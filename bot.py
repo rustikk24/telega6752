@@ -8,20 +8,31 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, Update
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+
 
 # ================= CONFIG =================
 
-TOKEN = os.getenv("BOT_TOKEN")  # <-- В Render Secrets
-WEBHOOK_PATH = "/webhook"
+TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
+WEBHOOK_PATH = "/webhook"
 
-# 🔥 2 OWNER ID
-OWNERS = {123456789, 987654321}  # <-- ВСТАВЬ СЮДА СВОИ ID
+OWNERS = {
+    int(x) for x in os.getenv("OWNERS", "123456789,987654321").split(",")
+}
+
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например https://your.onrender.com
+
 
 # ================= BOT =================
 
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(
+    token=TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+
 dp = Dispatcher()
+
 
 # ================= DB =================
 
@@ -45,16 +56,17 @@ CREATE TABLE IF NOT EXISTS tournaments (
 
 conn.commit()
 
+
 # ================= HELPERS =================
 
 def is_owner(user_id: int):
     return user_id in OWNERS
 
 
-# ================= TOURNAMENT CREATE =================
+# ================= TOURNAMENT =================
 
 @dp.message(F.text.startswith("/create"))
-async def create_tour(m: Message):
+async def create(m: Message):
     if not is_owner(m.from_user.id):
         return
 
@@ -73,25 +85,19 @@ async def create_tour(m: Message):
     await m.answer("🏆 Турнир создан")
 
 
-# ================= LIST =================
-
 @dp.message(F.text.startswith("/list"))
 async def list_tours(m: Message):
-    rows = cursor.execute(
-        "SELECT number, price FROM tournaments"
-    ).fetchall()
+    rows = cursor.execute("SELECT number, price FROM tournaments").fetchall()
 
     if not rows:
         return await m.answer("Нет турниров")
 
-    text = "🏆 Список турниров:\n\n"
+    text = "🏆 Турниры:\n\n"
     for r in rows:
         text += f"#{r[0]} — {r[1]}₽\n"
 
     await m.answer(text)
 
-
-# ================= JOIN =================
 
 @dp.message(F.text.startswith("/join"))
 async def join(m: Message):
@@ -117,33 +123,25 @@ async def join(m: Message):
     )
     conn.commit()
 
-    await m.answer(f"💰 Цена: {price}\n💳 Карта: {card}")
+    await m.answer(f"💰 {price}\n💳 {card}")
 
 
-# ================= PRICE =================
+# ================= ADMIN =================
 
 @dp.message(F.text.startswith("/price"))
 async def price(m: Message):
     if not is_owner(m.from_user.id):
         return
 
-    parts = m.text.split()
-    if len(parts) < 3:
-        return await m.answer("Формат: /price 1 100")
-
-    number = int(parts[1])
-    value = int(parts[2])
-
+    _, number, value = m.text.split()
     cursor.execute(
         "UPDATE tournaments SET price=? WHERE number=?",
-        (value, number)
+        (int(value), int(number))
     )
     conn.commit()
 
     await m.answer("💰 Цена обновлена")
 
-
-# ================= CARD =================
 
 @dp.message(F.text.startswith("/card"))
 async def card(m: Message):
@@ -151,9 +149,6 @@ async def card(m: Message):
         return
 
     parts = m.text.split(maxsplit=2)
-    if len(parts) < 3:
-        return await m.answer("Формат: /card 1 текст")
-
     number = int(parts[1])
     value = parts[2]
 
@@ -166,17 +161,12 @@ async def card(m: Message):
     await m.answer("💳 Карта обновлена")
 
 
-# ================= ROOM =================
-
 @dp.message(F.text.startswith("/room"))
 async def room(m: Message):
     if not is_owner(m.from_user.id):
         return
 
     parts = m.text.split(maxsplit=2)
-    if len(parts) < 3:
-        return await m.answer("Формат: /room 1 ссылка")
-
     number = int(parts[1])
     link = parts[2]
 
@@ -189,8 +179,6 @@ async def room(m: Message):
     await m.answer("🎮 Комната обновлена")
 
 
-# ================= SEND (FIXED) =================
-
 @dp.message(F.text.startswith("/send"))
 async def send_all(m: Message):
     if not is_owner(m.from_user.id):
@@ -198,7 +186,7 @@ async def send_all(m: Message):
 
     text = m.text.replace("/send", "").strip()
     if not text:
-        return await m.answer("Формат: /send сообщение")
+        return await m.answer("Формат: /send текст")
 
     users = cursor.execute("SELECT user_id FROM users").fetchall()
 
@@ -213,25 +201,19 @@ async def send_all(m: Message):
     await m.answer(f"📢 Отправлено: {count}")
 
 
-# ================= WEBHOOK HANDLER =================
+# ================= WEBHOOK =================
 
 async def webhook(request: web.Request):
     data = await request.json()
-
-    # ❌ ВАЖНО: правильный способ (FIX ERROR)
     update = Update.model_validate(data)
-
     await dp.feed_update(bot, update)
-
     return web.Response(text="OK")
 
 
 # ================= STARTUP =================
 
 async def on_startup(app: web.Application):
-    await bot.set_webhook(
-        f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
-    )
+    await bot.set_webhook(f"{WEBHOOK_URL}{WEBHOOK_PATH}")
     logging.info("Webhook set")
 
 
