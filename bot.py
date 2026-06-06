@@ -7,7 +7,7 @@ from aiogram.types import Message
 
 # ================= CONFIG =================
 
-TOKEN = "BOT_TOKEN"
+TOKEN = "8971928670:AAFroU0mYxWujdVw4p67WtC-2xY1EvzTlNY"
 
 OWNERS = {
     6279994177,
