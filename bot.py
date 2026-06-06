@@ -12,14 +12,8 @@ from aiogram.client.default import DefaultBotProperties
 # ================= ENV =================
 
 TOKEN = os.getenv("BOT_TOKEN")
-BASE_URL = os.getenv("BASE_URL")
-OWNERS_RAW = os.getenv("OWNERS", "")
-
-OWNERS = set()
-
-for x in OWNERS_RAW.split(","):
-    if x.strip().isdigit():
-        OWNERS.add(int(x.strip()))
+BASE_URL = os.getenv("BASE_URL")  # https://your-app.onrender.com
+OWNERS = set(map(int, filter(str.isdigit, os.getenv("OWNERS", "").split(","))))
 
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = BASE_URL + WEBHOOK_PATH
@@ -35,7 +29,7 @@ dp = Dispatcher()
 
 # ================= DB =================
 
-conn = sqlite3.connect("db.sqlite3")
+conn = sqlite3.connect("db.sqlite3", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -47,9 +41,9 @@ CREATE TABLE IF NOT EXISTS users (
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tournaments (
     number INTEGER PRIMARY KEY,
-    price INTEGER,
-    card TEXT,
-    room TEXT
+    price INTEGER DEFAULT 0,
+    card TEXT DEFAULT '',
+    room TEXT DEFAULT ''
 )
 """)
 
@@ -60,53 +54,32 @@ conn.commit()
 def is_owner(user_id: int) -> bool:
     return user_id in OWNERS
 
+def safe_int(x):
+    try:
+        return int(x)
+    except:
+        return None
+
 # ================= COMMANDS =================
 
 @dp.message(F.text == "/start")
 async def start(m: Message):
-    cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (m.from_user.id,))
+    cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
     conn.commit()
-    await m.answer("🤖 Бот активен")
-@dp.message(F.text.startswith("/tour"))
-async def create_tour(m: Message):
-    if not is_owner(m.from_user.id):
-        return
+    await m.answer("🤖 Бот работает")
 
-    try:
-        parts = m.text.split()
-
-        if len(parts) < 2:
-            return await m.answer("Используй: /tour 1")
-
-        number = int(parts[1])
-
-        cursor.execute(
-            """
-            INSERT OR IGNORE INTO tournaments
-            (number, price, card, room)
-            VALUES (?, ?, ?, ?)
-            """,
-            (number, 0, "Не указана", "Не указана")
-        )
-
-        conn.commit()
-
-        await m.answer(f"✅ Турнир #{number} создан")
-
-    except Exception as e:
-        await m.answer(f"Ошибка: {e}")
 # ---------- LIST ----------
 
 @dp.message(F.text.startswith("/list"))
-async def list_tournaments(m: Message):
+async def list_t(m: Message):
     rows = cursor.execute("SELECT number, price FROM tournaments").fetchall()
 
     if not rows:
         return await m.answer("Турниров нет")
 
     text = "🎮 Турниры:\n\n"
-    for r in rows:
-        text += f"#{r[0]} — {r[1]}₽\n"
+    for n, p in rows:
+        text += f"#{n} — {p}₽\n"
 
     await m.answer(text)
 
@@ -117,9 +90,11 @@ async def join(m: Message):
     parts = m.text.split()
 
     if len(parts) < 2:
-        return await m.answer("Используй: /join 1")
+        return await m.answer("Формат: /join 1")
 
-    number = int(parts[1])
+    number = safe_int(parts[1])
+    if number is None:
+        return await m.answer("Неверный номер")
 
     tour = cursor.execute(
         "SELECT price, card, room FROM tournaments WHERE number=?",
@@ -131,7 +106,7 @@ async def join(m: Message):
 
     price, card, room = tour
 
-    cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (m.from_user.id,))
+    cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
     conn.commit()
 
     await m.answer(
@@ -147,11 +122,19 @@ async def price(m: Message):
     if not is_owner(m.from_user.id):
         return
 
-    _, number, value = m.text.split()
+    parts = m.text.split()
+    if len(parts) < 3:
+        return await m.answer("Формат: /price 1 100")
+
+    number = safe_int(parts[1])
+    value = safe_int(parts[2])
+
+    if None in (number, value):
+        return await m.answer("Ошибка данных")
 
     cursor.execute(
         "UPDATE tournaments SET price=? WHERE number=?",
-        (int(value), int(number))
+        (value, number)
     )
     conn.commit()
 
@@ -165,7 +148,10 @@ async def card(m: Message):
         return
 
     parts = m.text.split(maxsplit=2)
-    number = int(parts[1])
+    if len(parts) < 3:
+        return await m.answer("Формат: /card 1 text")
+
+    number = safe_int(parts[1])
     value = parts[2]
 
     cursor.execute(
@@ -184,7 +170,10 @@ async def room(m: Message):
         return
 
     parts = m.text.split(maxsplit=2)
-    number = int(parts[1])
+    if len(parts) < 3:
+        return await m.answer("Формат: /room 1 link")
+
+    number = safe_int(parts[1])
     link = parts[2]
 
     cursor.execute(
@@ -206,17 +195,20 @@ async def send_all(m: Message):
 
     users = cursor.execute("SELECT user_id FROM users").fetchall()
 
-    for u in users:
+    for (uid,) in users:
         try:
-            await bot.send_message(u[0], text)
+            await bot.send_message(uid, text)
         except:
             pass
 
     await m.answer("📢 Отправлено")
-@dp.message(F.text.startswith("/debug"))
-async def debug_message(m: Message):
+
+# ---------- DEBUG ----------
+
+@dp.message(F.text == "/debug")
+async def debug(m: Message):
     await m.answer("бот работает ✅")
-    
+
 # ================= WEBHOOK =================
 
 async def handle(request):
@@ -225,7 +217,7 @@ async def handle(request):
 
         print("UPDATE:", data)
 
-        update = Update.model_validate(data)
+        update = Update(**data)
 
         await dp.feed_update(bot, update)
 
@@ -233,13 +225,14 @@ async def handle(request):
 
     except Exception as e:
         print("WEBHOOK ERROR:", e)
-        return web.Response(text=str(e), status=500)
+        return web.Response(text="error", status=500)
+
 async def on_startup(app):
+    await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     print("Webhook set:", WEBHOOK_URL)
 
 async def on_shutdown(app):
-    await bot.delete_webhook()
     await bot.session.close()
 
 app = web.Application()
