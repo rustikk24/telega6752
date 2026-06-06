@@ -9,15 +9,20 @@ from aiogram.types import Message
 
 # ================= CONFIG =================
 
-TOKEN = "PASTE_YOUR_TOKEN_HERE"
+TOKEN = os.getenv("BOT_TOKEN")  # 🔥 SECRET FROM RENDER
+BASE_URL = os.getenv("BASE_URL")  # https://your-app.onrender.com
 
-OWNERS = {6279994177, 5857555465}
-
-BASE_URL = "https://telega6752.onrender.com"
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_SECRET = "secret123"
 
 PORT = int(os.getenv("PORT", 10000))
+
+OWNERS = {6279994177, 5857555465}
+
+# ================= CHECK TOKEN =================
+
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set in environment variables")
 
 # ================= INIT =================
 
@@ -48,11 +53,11 @@ conn.commit()
 
 # ================= HELPERS =================
 
-def is_owner(uid: int):
-    return uid in OWNERS
+def is_owner(user_id: int):
+    return user_id in OWNERS
 
-def add_user(uid: int):
-    cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (uid,))
+def add_user(user_id: int):
+    cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (user_id,))
     conn.commit()
 
 # ================= COMMANDS =================
@@ -60,10 +65,9 @@ def add_user(uid: int):
 @dp.message(F.text == "/start")
 async def start(m: Message):
     add_user(m.from_user.id)
-    await m.answer("🤖 Bot V4 webhook online")
+    await m.answer("🤖 Bot V5 webhook online")
 
-# -------- CREATE TOURNAMENT --------
-
+# ---------- CREATE ----------
 @dp.message(F.text.startswith("/create"))
 async def create(m: Message):
     if not is_owner(m.from_user.id):
@@ -80,8 +84,7 @@ async def create(m: Message):
 
     await m.answer(f"✅ Турнир {number} создан")
 
-# -------- LIST --------
-
+# ---------- LIST ----------
 @dp.message(F.text == "/list")
 async def list_t(m: Message):
     if not is_owner(m.from_user.id):
@@ -90,17 +93,21 @@ async def list_t(m: Message):
     data = cursor.execute("SELECT number, price, card, room FROM tournaments").fetchall()
 
     if not data:
-        return await m.answer("❌ Нет турниров")
+        return await m.answer("❌ Турниров нет")
 
     text = "📋 Турниры:\n\n"
 
     for t in data:
-        text += f"🎮 {t[0]}\n💰 {t[1]}\n💳 {t[2]}\n🎮 {t[3]}\n\n"
+        text += (
+            f"🎮 {t[0]}\n"
+            f"💰 {t[1]}\n"
+            f"💳 {t[2]}\n"
+            f"🎮 {t[3]}\n\n"
+        )
 
     await m.answer(text)
 
-# -------- PRICE --------
-
+# ---------- PRICE ----------
 @dp.message(F.text.startswith("/price"))
 async def price(m: Message):
     if not is_owner(m.from_user.id):
@@ -116,14 +123,16 @@ async def price(m: Message):
 
     await m.answer("💰 Цена обновлена")
 
-# -------- CARD --------
-
+# ---------- CARD ----------
 @dp.message(F.text.startswith("/card"))
 async def card(m: Message):
     if not is_owner(m.from_user.id):
         return
 
     parts = m.text.split(maxsplit=2)
+    if len(parts) < 3:
+        return await m.answer("Формат: /card 1 текст")
+
     number = int(parts[1])
     value = parts[2]
 
@@ -135,14 +144,16 @@ async def card(m: Message):
 
     await m.answer("💳 Карта обновлена")
 
-# -------- ROOM --------
-
+# ---------- ROOM ----------
 @dp.message(F.text.startswith("/room"))
 async def room(m: Message):
     if not is_owner(m.from_user.id):
         return
 
     parts = m.text.split(maxsplit=2)
+    if len(parts) < 3:
+        return await m.answer("Формат: /room 1 ссылка")
+
     number = int(parts[1])
     link = parts[2]
 
@@ -154,8 +165,7 @@ async def room(m: Message):
 
     await m.answer("🎮 Комната обновлена")
 
-# -------- SEND (BROADCAST) --------
-
+# ---------- SEND ----------
 @dp.message(F.text.startswith("/send"))
 async def send_all(m: Message):
     if not is_owner(m.from_user.id):
@@ -187,8 +197,13 @@ async def health(request):
     return web.Response(text="bot alive")
 
 async def on_startup():
+    # 🔥 УБИРАЕМ POLLING / WEBHOOK КОНФЛИКТЫ
     await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(f"{BASE_URL}{WEBHOOK_PATH}", secret_token=WEBHOOK_SECRET)
+
+    await bot.set_webhook(
+        url=f"{BASE_URL}{WEBHOOK_PATH}",
+        secret_token=WEBHOOK_SECRET
+    )
 
 # ================= APP =================
 
@@ -208,7 +223,7 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-    print("BOT RUNNING (V4 WEBHOOK)")
+    print("🚀 BOT V5 RUNNING (WEBHOOK OK)")
 
     while True:
         await asyncio.sleep(3600)
