@@ -1,36 +1,27 @@
 import asyncio
 import logging
 import sqlite3
-import os
 
-from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, Update
-from aiogram.filters import CommandStart
+from aiogram.types import Message
 
 # ================= CONFIG =================
 
-TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT = int(os.getenv("PORT", 10000))
-WEBHOOK_PATH = "/webhook"
+TOKEN = "PUT_YOUR_TOKEN_HERE"
 
-if not TOKEN:
-    raise Exception("BOT_TOKEN is not set")
+OWNERS = {
+    6279994177,
+    5857555465
+}
+
+# ================= BOT INIT =================
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ================= ADMINS =================
-
-ADMINS = {6279994177, 5857555465}
-
-def is_admin(user_id: int):
-    return user_id in ADMINS
-
 # ================= DB =================
 
-conn = sqlite3.connect("bot.db", check_same_thread=False)
+conn = sqlite3.connect("bot.db")
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -41,10 +32,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tournaments (
-    number INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    date TEXT,
-    time TEXT,
+    number INTEGER PRIMARY KEY,
     price INTEGER DEFAULT 0,
     card TEXT DEFAULT '',
     room TEXT DEFAULT ''
@@ -53,157 +41,150 @@ CREATE TABLE IF NOT EXISTS tournaments (
 
 conn.commit()
 
-# ================= HOME (FIX 404) =================
+# ================= HELPERS =================
 
-async def home(request):
-    return web.Response(text="Bot is running")
+def is_owner(user_id: int) -> bool:
+    return user_id in OWNERS
+
+def add_user(user_id: int):
+    cursor.execute(
+        "INSERT OR IGNORE INTO users(user_id) VALUES (?)",
+        (user_id,)
+    )
+    conn.commit()
 
 # ================= START =================
 
-@dp.message(CommandStart())
+@dp.message(F.text == "/start")
 async def start(m: Message):
-    cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
-    conn.commit()
-    await m.answer("👋 Бот турниров работает")
+    add_user(m.from_user.id)
+    await m.answer("👋 Привет! Бот турниров активирован")
 
-# ================= TOURNAMENT CREATE FLOW =================
+# ================= CREATE TOURNAMENT =================
 
-tour_state = {}
-
-@dp.message(F.text == "/tour")
-async def tour(m: Message):
-    if not is_admin(m.from_user.id):
-        return await m.answer("❌ Нет доступа")
-
-    tour_state[m.from_user.id] = {}
-    await m.answer("🏆 Название турнира?")
-
-@dp.message()
-async def tour_flow(m: Message):
-    if m.from_user.id not in tour_state:
+@dp.message(F.text.startswith("/create"))
+async def create(m: Message):
+    if not is_owner(m.from_user.id):
         return
 
-    data = tour_state[m.from_user.id]
+    parts = m.text.split()
+    if len(parts) < 2:
+        return await m.answer("Формат: /create 1")
 
-    if "name" not in data:
-        data["name"] = m.text
-        return await m.answer("📅 Дата (DD.MM.YYYY)")
+    number = int(parts[1])
 
-    if "date" not in data:
-        data["date"] = m.text
-        return await m.answer("⏰ Время (HH:MM)")
+    cursor.execute(
+        "INSERT OR IGNORE INTO tournaments(number) VALUES (?)",
+        (number,)
+    )
+    conn.commit()
 
-    if "time" not in data:
-        data["time"] = m.text
-        return await m.answer("💰 Цена")
-
-    if "price" not in data:
-        try:
-            data["price"] = int(m.text)
-        except:
-            return await m.answer("❌ Введи число")
-
-        cursor.execute("""
-        INSERT INTO tournaments (name, date, time, price)
-        VALUES (?, ?, ?, ?)
-        """, (data["name"], data["date"], data["time"], data["price"]))
-
-        conn.commit()
-        del tour_state[m.from_user.id]
-
-        return await m.answer("✅ Турнир создан")
+    await m.answer(f"✅ Турнир {number} создан")
 
 # ================= LIST =================
 
 @dp.message(F.text == "/list")
-async def list_t(m: Message):
-    rows = cursor.execute("SELECT number, name, price FROM tournaments").fetchall()
+async def list_tours(m: Message):
+    if not is_owner(m.from_user.id):
+        return
 
-    if not rows:
-        return await m.answer("Нет турниров")
+    tours = cursor.execute(
+        "SELECT number, price, card, room FROM tournaments"
+    ).fetchall()
 
-    text = "🏆 Турниры:\n\n"
-    for r in rows:
-        text += f"#{r[0]} | {r[1]} | 💰 {r[2]}\n"
+    if not tours:
+        return await m.answer("❌ Турниров нет")
+
+    text = "📋 Турниры:\n\n"
+
+    for t in tours:
+        text += (
+            f"🎮 {t[0]}\n"
+            f"💰 {t[1]}\n"
+            f"💳 {t[2]}\n"
+            f"🎮 {t[3]}\n\n"
+        )
 
     await m.answer(text)
 
-# ================= JOIN =================
-
-@dp.message(F.text.startswith("/join"))
-async def join(m: Message):
-    try:
-        number = int(m.text.split()[1])
-    except:
-        return await m.answer("Формат: /join 1")
-
-    tour = cursor.execute(
-        "SELECT price, card, room FROM tournaments WHERE number=?",
-        (number,)
-    ).fetchone()
-
-    if not tour:
-        return await m.answer("❌ Турнир не найден")
-
-    price, card, room = tour
-
-    cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
-    conn.commit()
-
-    await m.answer(
-        f"🎮 Турнир #{number}\n"
-        f"💰 Цена: {price}\n"
-        f"💳 Карта: {card}\n"
-        f"🚪 Комната: {room}"
-    )
-
-# ================= ADMIN COMMANDS =================
+# ================= PRICE =================
 
 @dp.message(F.text.startswith("/price"))
 async def price(m: Message):
-    if not is_admin(m.from_user.id):
+    if not is_owner(m.from_user.id):
         return
 
-    try:
-        _, number, value = m.text.split()
-        cursor.execute("UPDATE tournaments SET price=? WHERE number=?", (int(value), int(number)))
-        conn.commit()
-        await m.answer("💰 Цена обновлена")
-    except:
-        await m.answer("Формат: /price 1 100")
+    parts = m.text.split()
+    if len(parts) < 3:
+        return await m.answer("Формат: /price 1 100")
+
+    number = int(parts[1])
+    value = int(parts[2])
+
+    cursor.execute(
+        "UPDATE tournaments SET price=? WHERE number=?",
+        (value, number)
+    )
+    conn.commit()
+
+    await m.answer("💰 Цена обновлена")
+
+# ================= CARD =================
 
 @dp.message(F.text.startswith("/card"))
 async def card(m: Message):
-    if not is_admin(m.from_user.id):
+    if not is_owner(m.from_user.id):
         return
 
-    try:
-        _, number, value = m.text.split(maxsplit=2)
-        cursor.execute("UPDATE tournaments SET card=? WHERE number=?", (value, int(number)))
-        conn.commit()
-        await m.answer("💳 Карта обновлена")
-    except:
-        await m.answer("Формат: /card 1 текст")
+    parts = m.text.split(maxsplit=2)
+    if len(parts) < 3:
+        return await m.answer("Формат: /card 1 текст")
+
+    number = int(parts[1])
+    value = parts[2]
+
+    cursor.execute(
+        "UPDATE tournaments SET card=? WHERE number=?",
+        (value, number)
+    )
+    conn.commit()
+
+    await m.answer("💳 Карта обновлена")
+
+# ================= ROOM =================
 
 @dp.message(F.text.startswith("/room"))
 async def room(m: Message):
-    if not is_admin(m.from_user.id):
+    if not is_owner(m.from_user.id):
         return
 
-    try:
-        _, number, link = m.text.split(maxsplit=2)
-        cursor.execute("UPDATE tournaments SET room=? WHERE number=?", (link, int(number)))
-        conn.commit()
-        await m.answer("🎮 Комната обновлена")
-    except:
-        await m.answer("Формат: /room 1 ссылка")
+    parts = m.text.split(maxsplit=2)
+    if len(parts) < 3:
+        return await m.answer("Формат: /room 1 ссылка")
+
+    number = int(parts[1])
+    link = parts[2]
+
+    cursor.execute(
+        "UPDATE tournaments SET room=? WHERE number=?",
+        (link, number)
+    )
+    conn.commit()
+
+    await m.answer("🎮 Комната обновлена")
+
+# ================= SEND =================
 
 @dp.message(F.text.startswith("/send"))
 async def send_all(m: Message):
-    if not is_admin(m.from_user.id):
+    if not is_owner(m.from_user.id):
         return
 
-    text = m.text.replace("/send", "").strip()
+    parts = m.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return await m.answer("Формат: /send текст")
+
+    text = parts[1]
 
     users = cursor.execute("SELECT user_id FROM users").fetchall()
 
@@ -215,39 +196,17 @@ async def send_all(m: Message):
 
     await m.answer("📢 Рассылка отправлена")
 
-# ================= WEBHOOK HANDLER =================
+# ================= FALLBACK =================
 
-async def handle(request: web.Request):
-    data = await request.json()
-    update = Update.model_validate(data)
-    await dp.feed_update(bot, update)
-    return web.Response()
+@dp.message()
+async def fallback(m: Message):
+    await m.answer("❓ Неизвестная команда")
 
-# ================= STARTUP =================
+# ================= MAIN =================
 
-async def on_startup(app):
-    await bot.set_webhook(WEBHOOK_URL + WEBHOOK_PATH)
-    print("Webhook set:", WEBHOOK_URL + WEBHOOK_PATH)
-
-async def on_shutdown(app):
-    await bot.delete_webhook()
-    await bot.session.close()
-
-# ================= APP =================
-
-def create_app():
-    app = web.Application()
-
-    app.router.add_post(WEBHOOK_PATH, handle)
-    app.router.add_get("/", home)
-
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-
-    return app
-
-# ================= RUN =================
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    web.run_app(create_app(), port=PORT)
+    asyncio.run(main())
