@@ -14,14 +14,12 @@ from aiogram.client.default import DefaultBotProperties
 # ================= CONFIG =================
 
 TOKEN = os.getenv("BOT_TOKEN")
+
 PORT = int(os.getenv("PORT", 10000))
 WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-OWNERS = {
-    int(x) for x in os.getenv("OWNERS", "123456789,987654321").split(",")
-}
-
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например https://your.onrender.com
+OWNERS = {int(x) for x in os.getenv("OWNERS", "123456789,987654321").split(",")}
 
 
 # ================= BOT =================
@@ -63,7 +61,7 @@ def is_owner(user_id: int):
     return user_id in OWNERS
 
 
-# ================= TOURNAMENT =================
+# ================= TOURNAMENTS =================
 
 @dp.message(F.text.startswith("/create"))
 async def create(m: Message):
@@ -76,10 +74,7 @@ async def create(m: Message):
 
     number = int(parts[1])
 
-    cursor.execute(
-        "INSERT OR IGNORE INTO tournaments(number) VALUES (?)",
-        (number,)
-    )
+    cursor.execute("INSERT OR IGNORE INTO tournaments(number) VALUES (?)", (number,))
     conn.commit()
 
     await m.answer("🏆 Турнир создан")
@@ -117,10 +112,7 @@ async def join(m: Message):
 
     price, card = tour
 
-    cursor.execute(
-        "INSERT OR IGNORE INTO users(user_id) VALUES (?)",
-        (m.from_user.id,)
-    )
+    cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (m.from_user.id,))
     conn.commit()
 
     await m.answer(f"💰 {price}\n💳 {card}")
@@ -134,10 +126,7 @@ async def price(m: Message):
         return
 
     _, number, value = m.text.split()
-    cursor.execute(
-        "UPDATE tournaments SET price=? WHERE number=?",
-        (int(value), int(number))
-    )
+    cursor.execute("UPDATE tournaments SET price=? WHERE number=?", (int(value), int(number)))
     conn.commit()
 
     await m.answer("💰 Цена обновлена")
@@ -152,10 +141,7 @@ async def card(m: Message):
     number = int(parts[1])
     value = parts[2]
 
-    cursor.execute(
-        "UPDATE tournaments SET card=? WHERE number=?",
-        (value, number)
-    )
+    cursor.execute("UPDATE tournaments SET card=? WHERE number=?", (value, number))
     conn.commit()
 
     await m.answer("💳 Карта обновлена")
@@ -170,10 +156,7 @@ async def room(m: Message):
     number = int(parts[1])
     link = parts[2]
 
-    cursor.execute(
-        "UPDATE tournaments SET room=? WHERE number=?",
-        (link, number)
-    )
+    cursor.execute("UPDATE tournaments SET room=? WHERE number=?", (link, number))
     conn.commit()
 
     await m.answer("🎮 Комната обновлена")
@@ -201,13 +184,17 @@ async def send_all(m: Message):
     await m.answer(f"📢 Отправлено: {count}")
 
 
-# ================= WEBHOOK =================
+# ================= WEB SERVER =================
 
-async def webhook(request: web.Request):
+async def webhook_handler(request: web.Request):
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
     return web.Response(text="OK")
+
+
+async def home(request):
+    return web.Response(text="Bot is running")
 
 
 # ================= STARTUP =================
@@ -222,13 +209,16 @@ async def on_shutdown(app: web.Application):
     await bot.session.close()
 
 
-# ================= APP =================
+# ================= MAIN =================
 
 def main():
     logging.basicConfig(level=logging.INFO)
 
     app = web.Application()
-    app.router.add_post(WEBHOOK_PATH, webhook)
+
+    app.router.add_post(WEBHOOK_PATH, webhook_handler)
+    app.router.add_get("/", home)
+    app.router.add_get("/health", home)
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
