@@ -246,7 +246,3 @@ app.on_shutdown.append(on_shutdown)
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-    @dp.message()
-async def test(m: Message):
-    print("GOT:", m.text)
-    await m.answer("ok")
