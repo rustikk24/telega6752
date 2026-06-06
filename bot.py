@@ -67,7 +67,34 @@ async def start(m: Message):
     cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (m.from_user.id,))
     conn.commit()
     await m.answer("🤖 Бот активен")
+@dp.message(F.text.startswith("/tour"))
+async def create_tour(m: Message):
+    if not is_owner(m.from_user.id):
+        return
 
+    try:
+        parts = m.text.split()
+
+        if len(parts) < 2:
+            return await m.answer("Используй: /tour 1")
+
+        number = int(parts[1])
+
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO tournaments
+            (number, price, card, room)
+            VALUES (?, ?, ?, ?)
+            """,
+            (number, 0, "Не указана", "Не указана")
+        )
+
+        conn.commit()
+
+        await m.answer(f"✅ Турнир #{number} создан")
+
+    except Exception as e:
+        await m.answer(f"Ошибка: {e}")
 # ---------- LIST ----------
 
 @dp.message(F.text.startswith("/list"))
@@ -186,15 +213,27 @@ async def send_all(m: Message):
             pass
 
     await m.answer("📢 Отправлено")
-
+@dp.message(F.text.startswith("/debug"))
+async def debug_message(m: Message):
+    await m.answer("бот работает ✅")
+    
 # ================= WEBHOOK =================
 
 async def handle(request):
-    data = await request.json()
-    update = Update.model_validate(data)
-    await dp.feed_update(bot, update)
-    return web.Response(text="ok")
+    try:
+        data = await request.json()
 
+        print("UPDATE:", data)
+
+        update = Update.model_validate(data)
+
+        await dp.feed_update(bot, update)
+
+        return web.Response(text="ok")
+
+    except Exception as e:
+        print("WEBHOOK ERROR:", e)
+        return web.Response(text=str(e), status=500)
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
     print("Webhook set:", WEBHOOK_URL)
