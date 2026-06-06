@@ -1,32 +1,26 @@
+import os
 import asyncio
 import logging
-import os
 import sqlite3
 
 from aiohttp import web
+
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import Message, Update
+from aiogram.enums import ParseMode
 
 # ================= CONFIG =================
 
-TOKEN = os.getenv("BOT_TOKEN")  # 🔥 SECRET FROM RENDER
-BASE_URL = os.getenv("BASE_URL")  # https://your-app.onrender.com
-
+TOKEN = os.getenv("BOT_TOKEN")  # <-- В Render Secrets
 WEBHOOK_PATH = "/webhook"
-WEBHOOK_SECRET = "secret123"
-
 PORT = int(os.getenv("PORT", 10000))
 
-OWNERS = {6279994177, 5857555465}
+# 🔥 2 OWNER ID
+OWNERS = {123456789, 987654321}  # <-- ВСТАВЬ СЮДА СВОИ ID
 
-# ================= CHECK TOKEN =================
+# ================= BOT =================
 
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set in environment variables")
-
-# ================= INIT =================
-
-bot = Bot(token=TOKEN)
+bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
 # ================= DB =================
@@ -56,20 +50,11 @@ conn.commit()
 def is_owner(user_id: int):
     return user_id in OWNERS
 
-def add_user(user_id: int):
-    cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (user_id,))
-    conn.commit()
 
-# ================= COMMANDS =================
+# ================= TOURNAMENT CREATE =================
 
-@dp.message(F.text == "/start")
-async def start(m: Message):
-    add_user(m.from_user.id)
-    await m.answer("🤖 Bot V5 webhook online")
-
-# ---------- CREATE ----------
 @dp.message(F.text.startswith("/create"))
-async def create(m: Message):
+async def create_tour(m: Message):
     if not is_owner(m.from_user.id):
         return
 
@@ -79,51 +64,87 @@ async def create(m: Message):
 
     number = int(parts[1])
 
-    cursor.execute("INSERT OR IGNORE INTO tournaments(number) VALUES (?)", (number,))
+    cursor.execute(
+        "INSERT OR IGNORE INTO tournaments(number) VALUES (?)",
+        (number,)
+    )
     conn.commit()
 
-    await m.answer(f"✅ Турнир {number} создан")
+    await m.answer("🏆 Турнир создан")
 
-# ---------- LIST ----------
-@dp.message(F.text == "/list")
-async def list_t(m: Message):
-    if not is_owner(m.from_user.id):
-        return
 
-    data = cursor.execute("SELECT number, price, card, room FROM tournaments").fetchall()
+# ================= LIST =================
 
-    if not data:
-        return await m.answer("❌ Турниров нет")
+@dp.message(F.text.startswith("/list"))
+async def list_tours(m: Message):
+    rows = cursor.execute(
+        "SELECT number, price FROM tournaments"
+    ).fetchall()
 
-    text = "📋 Турниры:\n\n"
+    if not rows:
+        return await m.answer("Нет турниров")
 
-    for t in data:
-        text += (
-            f"🎮 {t[0]}\n"
-            f"💰 {t[1]}\n"
-            f"💳 {t[2]}\n"
-            f"🎮 {t[3]}\n\n"
-        )
+    text = "🏆 Список турниров:\n\n"
+    for r in rows:
+        text += f"#{r[0]} — {r[1]}₽\n"
 
     await m.answer(text)
 
-# ---------- PRICE ----------
+
+# ================= JOIN =================
+
+@dp.message(F.text.startswith("/join"))
+async def join(m: Message):
+    parts = m.text.split()
+    if len(parts) < 2:
+        return await m.answer("Формат: /join 1")
+
+    number = int(parts[1])
+
+    tour = cursor.execute(
+        "SELECT price, card FROM tournaments WHERE number=?",
+        (number,)
+    ).fetchone()
+
+    if not tour:
+        return await m.answer("Турнир не найден")
+
+    price, card = tour
+
+    cursor.execute(
+        "INSERT OR IGNORE INTO users(user_id) VALUES (?)",
+        (m.from_user.id,)
+    )
+    conn.commit()
+
+    await m.answer(f"💰 Цена: {price}\n💳 Карта: {card}")
+
+
+# ================= PRICE =================
+
 @dp.message(F.text.startswith("/price"))
 async def price(m: Message):
     if not is_owner(m.from_user.id):
         return
 
-    _, number, value = m.text.split()
+    parts = m.text.split()
+    if len(parts) < 3:
+        return await m.answer("Формат: /price 1 100")
+
+    number = int(parts[1])
+    value = int(parts[2])
 
     cursor.execute(
         "UPDATE tournaments SET price=? WHERE number=?",
-        (int(value), int(number))
+        (value, number)
     )
     conn.commit()
 
     await m.answer("💰 Цена обновлена")
 
-# ---------- CARD ----------
+
+# ================= CARD =================
+
 @dp.message(F.text.startswith("/card"))
 async def card(m: Message):
     if not is_owner(m.from_user.id):
@@ -144,7 +165,9 @@ async def card(m: Message):
 
     await m.answer("💳 Карта обновлена")
 
-# ---------- ROOM ----------
+
+# ================= ROOM =================
+
 @dp.message(F.text.startswith("/room"))
 async def room(m: Message):
     if not is_owner(m.from_user.id):
@@ -165,68 +188,71 @@ async def room(m: Message):
 
     await m.answer("🎮 Комната обновлена")
 
-# ---------- SEND ----------
+
+# ================= SEND (FIXED) =================
+
 @dp.message(F.text.startswith("/send"))
 async def send_all(m: Message):
     if not is_owner(m.from_user.id):
         return
 
     text = m.text.replace("/send", "").strip()
+    if not text:
+        return await m.answer("Формат: /send сообщение")
 
     users = cursor.execute("SELECT user_id FROM users").fetchall()
 
+    count = 0
     for u in users:
         try:
             await bot.send_message(u[0], text)
+            count += 1
         except:
             pass
 
-    await m.answer("📢 Рассылка отправлена")
+    await m.answer(f"📢 Отправлено: {count}")
 
-# ================= WEBHOOK =================
 
-async def handle(request):
+# ================= WEBHOOK HANDLER =================
+
+async def webhook(request: web.Request):
     data = await request.json()
 
-    update = dp.update.model_validate(data)
+    # ❌ ВАЖНО: правильный способ (FIX ERROR)
+    update = Update.model_validate(data)
+
     await dp.feed_update(bot, update)
 
-    return web.Response(text="ok")
+    return web.Response(text="OK")
 
-async def health(request):
-    return web.Response(text="bot alive")
 
-async def on_startup():
-    # 🔥 УБИРАЕМ POLLING / WEBHOOK КОНФЛИКТЫ
-    await bot.delete_webhook(drop_pending_updates=True)
+# ================= STARTUP =================
 
+async def on_startup(app: web.Application):
     await bot.set_webhook(
-        url=f"{BASE_URL}{WEBHOOK_PATH}",
-        secret_token=WEBHOOK_SECRET
+        f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
     )
+    logging.info("Webhook set")
+
+
+async def on_shutdown(app: web.Application):
+    await bot.delete_webhook()
+    await bot.session.close()
+
 
 # ================= APP =================
 
-async def main():
+def main():
     logging.basicConfig(level=logging.INFO)
 
     app = web.Application()
+    app.router.add_post(WEBHOOK_PATH, webhook)
 
-    app.router.add_post(WEBHOOK_PATH, handle)
-    app.router.add_get("/", health)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
 
-    await on_startup()
+    web.run_app(app, host="0.0.0.0", port=PORT)
 
-    runner = web.AppRunner(app)
-    await runner.setup()
-
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-
-    print("🚀 BOT V5 RUNNING (WEBHOOK OK)")
-
-    while True:
-        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
