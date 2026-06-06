@@ -1,20 +1,30 @@
 import asyncio
 import logging
+import os
 import sqlite3
-from aiohttp import web
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, Update
-from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
-# ================= CONFIG =================
+# ================= ENV =================
 
-TOKEN = "PASTE_YOUR_TOKEN_HERE"
+TOKEN = os.getenv("BOT_TOKEN")
+BASE_URL = os.getenv("BASE_URL")
+OWNERS_RAW = os.getenv("OWNERS", "")
+
+OWNERS = set()
+
+for x in OWNERS_RAW.split(","):
+    if x.strip().isdigit():
+        OWNERS.add(int(x.strip()))
+
 WEBHOOK_PATH = "/webhook"
-BASE_URL = "https://YOUR-RENDER-URL.onrender.com"
-
 WEBHOOK_URL = BASE_URL + WEBHOOK_PATH
+
+# ================= BOT =================
 
 bot = Bot(
     token=TOKEN,
@@ -45,9 +55,7 @@ CREATE TABLE IF NOT EXISTS tournaments (
 
 conn.commit()
 
-# ================= OWNER =================
-
-OWNERS = {123456789, 987654321}  # <- замени на свои ID
+# ================= HELPERS =================
 
 def is_owner(user_id: int) -> bool:
     return user_id in OWNERS
@@ -58,7 +66,7 @@ def is_owner(user_id: int) -> bool:
 async def start(m: Message):
     cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (m.from_user.id,))
     conn.commit()
-    await m.answer("Привет! Бот работает ✅")
+    await m.answer("🤖 Бот активен")
 
 # ---------- LIST ----------
 
@@ -71,7 +79,7 @@ async def list_tournaments(m: Message):
 
     text = "🎮 Турниры:\n\n"
     for r in rows:
-        text += f"№{r[0]} — {r[1]}₽\n"
+        text += f"#{r[0]} — {r[1]}₽\n"
 
     await m.answer(text)
 
@@ -82,7 +90,7 @@ async def join(m: Message):
     parts = m.text.split()
 
     if len(parts) < 2:
-        return await m.answer("Формат: /join 1")
+        return await m.answer("Используй: /join 1")
 
     number = int(parts[1])
 
@@ -100,7 +108,7 @@ async def join(m: Message):
     conn.commit()
 
     await m.answer(
-        f"💰 Цена: {price}₽\n"
+        f"💰 Цена: {price}\n"
         f"💳 Карта: {card}\n"
         f"🎮 Комната: {room}"
     )
@@ -120,7 +128,7 @@ async def price(m: Message):
     )
     conn.commit()
 
-    await m.answer("💰 Цена обновлена")
+    await m.answer("💰 Обновлено")
 
 # ---------- CARD ----------
 
@@ -130,7 +138,6 @@ async def card(m: Message):
         return
 
     parts = m.text.split(maxsplit=2)
-
     number = int(parts[1])
     value = parts[2]
 
@@ -140,7 +147,7 @@ async def card(m: Message):
     )
     conn.commit()
 
-    await m.answer("💳 Карта обновлена")
+    await m.answer("💳 Обновлено")
 
 # ---------- ROOM ----------
 
@@ -150,7 +157,6 @@ async def room(m: Message):
         return
 
     parts = m.text.split(maxsplit=2)
-
     number = int(parts[1])
     link = parts[2]
 
@@ -160,7 +166,7 @@ async def room(m: Message):
     )
     conn.commit()
 
-    await m.answer("🎮 Комната обновлена")
+    await m.answer("🎮 Обновлено")
 
 # ---------- SEND ----------
 
@@ -179,7 +185,7 @@ async def send_all(m: Message):
         except:
             pass
 
-    await m.answer("📢 Рассылка отправлена")
+    await m.answer("📢 Отправлено")
 
 # ================= WEBHOOK =================
 
@@ -187,7 +193,7 @@ async def handle(request):
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
-    return web.Response()
+    return web.Response(text="ok")
 
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
@@ -207,4 +213,4 @@ app.on_shutdown.append(on_shutdown)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    web.run_app(app, host="0.0.0.0", port=10000)
+    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
