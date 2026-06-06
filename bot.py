@@ -13,7 +13,7 @@ TOKEN = "PASTE_YOUR_TOKEN_HERE"
 
 OWNERS = {6279994177, 5857555465}
 
-BASE_URL = "https://YOUR-RENDER-URL.onrender.com"
+BASE_URL = "https://telega6752.onrender.com"
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_SECRET = "secret123"
 
