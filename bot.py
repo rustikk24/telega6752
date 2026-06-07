@@ -19,6 +19,11 @@ TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 OWNERS = set(int(x) for x in os.getenv("OWNERS", "").split(",") if x.strip().isdigit())
 
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
+if not BASE_URL:
+    raise RuntimeError("BASE_URL is not set")
+
 WEBHOOK_URL = BASE_URL + "/webhook"
 
 # ================= BOT =================
@@ -86,7 +91,7 @@ def menu(admin=False):
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 admin_kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="➕ Создать турнир", callback_data="create")],
+    [InlineKeyboardButton(text="➕ Создать", callback_data="create")],
     [InlineKeyboardButton(text="📋 Турниры", callback_data="admin_list")],
     [InlineKeyboardButton(text="👥 Игроки", callback_data="admin_players")],
     [InlineKeyboardButton(text="🏠 Румы", callback_data="admin_room")],
@@ -97,7 +102,7 @@ admin_kb = InlineKeyboardMarkup(inline_keyboard=[
 
 @dp.message(F.text == "/start")
 async def start(m: Message):
-    await m.answer("🎮 Главное меню", reply_markup=menu(is_owner(m.from_user.id)))
+    await m.answer("🎮 Меню", reply_markup=menu(is_owner(m.from_user.id)))
 
 # ================= LIST =================
 
@@ -158,7 +163,7 @@ async def join_handler(m: Message, state: FSMContext):
 async def leave(c: CallbackQuery):
     cursor.execute("DELETE FROM players WHERE user_id=?", (c.from_user.id,))
     conn.commit()
-    await c.message.answer("🚪 Ты вышел из всех турниров")
+    await c.message.answer("🚪 Ты вышел из турниров")
 
 # ================= ADMIN =================
 
@@ -169,27 +174,27 @@ async def admin(c: CallbackQuery):
 
     await c.message.answer("⚙ ADMIN PANEL", reply_markup=admin_kb)
 
-# ================= CREATE TOURNAMENT =================
+# ================= CREATE =================
 
 @dp.callback_query(F.data == "create")
 async def create(c: CallbackQuery, state: FSMContext):
-    await c.message.answer("Введите номер турнира")
+    await c.message.answer("Номер турнира")
     await state.set_state(CreateTournament.number)
 
 @dp.message(CreateTournament.number)
-async def create_num(m: Message, state: FSMContext):
+async def c1(m: Message, state: FSMContext):
     await state.update_data(number=int(m.text))
-    await m.answer("Цена (₽)")
+    await m.answer("Цена")
     await state.set_state(CreateTournament.price)
 
 @dp.message(CreateTournament.price)
-async def create_price(m: Message, state: FSMContext):
+async def c2(m: Message, state: FSMContext):
     await state.update_data(price=int(m.text))
     await m.answer("Макс игроков")
     await state.set_state(CreateTournament.max_players)
 
 @dp.message(CreateTournament.max_players)
-async def create_finish(m: Message, state: FSMContext):
+async def c3(m: Message, state: FSMContext):
     data = await state.get_data()
 
     cursor.execute("""
@@ -210,7 +215,7 @@ async def admin_list(c: CallbackQuery):
 
     text = "📋 Турниры:\n\n"
     for n, p, mpx, r in rows:
-        text += f"#{n} | {p}₽ | {mpx} слотов | {'🟢' if r else '🔴'}\n"
+        text += f"#{n} | {p}₽ | {mpx} | {'🟢' if r else '🔴'}\n"
 
     await c.message.answer(text)
 
@@ -222,14 +227,14 @@ async def players(c: CallbackQuery):
 
     text = "👥 Игроки:\n\n"
     for t, u in rows:
-        text += f"#{t} → {u}\n"
+        text += f"{t} → {u}\n"
 
     await c.message.answer(text)
 
 # ================= DELETE =================
 
 @dp.callback_query(F.data == "admin_delete")
-async def delete_prompt(c: CallbackQuery):
+async def del_hint(c: CallbackQuery):
     await c.message.answer("Введи номер турнира")
 
 @dp.message(F.text.regexp(r"^\d+$"))
@@ -249,7 +254,7 @@ async def delete(m: Message):
 
 @dp.callback_query(F.data == "admin_room")
 async def room(c: CallbackQuery, state: FSMContext):
-    await c.message.answer("Введи: номер + ссылка")
+    await c.message.answer("номер + ссылка")
     await state.set_state(RoomFSM.data)
 
 @dp.message(RoomFSM.data)
@@ -262,7 +267,7 @@ async def set_room(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("🏠 Рума обновлена")
 
-# ================= WEBHOOK =================
+# ================= WEB SERVER =================
 
 async def handle(request):
     data = await request.json()
@@ -270,21 +275,48 @@ async def handle(request):
     await dp.feed_update(bot, update)
     return web.Response(text="ok")
 
+async def index(request):
+    return web.Response(text="BOT IS RUNNING")
+
+# ================= WEBHOOK AUTO RESTART =================
+
+async def webhook_watcher():
+    while True:
+        try:
+            info = await bot.get_webhook_info()
+
+            if info.url != WEBHOOK_URL:
+                print("⚠️ webhook слетел → восстанавливаю")
+                await bot.set_webhook(WEBHOOK_URL)
+                print("✅ webhook восстановлен")
+
+        except Exception as e:
+            print("❌ webhook error:", e)
+
+        await asyncio.sleep(60)
+
+# ================= STARTUP =================
+
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
-    print("WEBHOOK OK")
+    print("WEBHOOK READY:", WEBHOOK_URL)
+
+    asyncio.create_task(webhook_watcher())
 
 async def on_shutdown(app):
     await bot.delete_webhook()
     await bot.session.close()
 
-# ================= RUN =================
+# ================= APP =================
 
 app = web.Application()
 app.router.add_post("/webhook", handle)
+app.router.add_get("/", index)
 
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
+
+# ================= RUN =================
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
