@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import sqlite3
-from datetime import datetime, timedelta
 
 from aiohttp import web
 
@@ -43,7 +42,6 @@ CREATE TABLE IF NOT EXISTS tournaments (
     price INTEGER,
     card TEXT,
     room TEXT,
-    start_time TEXT,
     max_players INTEGER DEFAULT 10
 )
 """)
@@ -65,35 +63,32 @@ conn.commit()
 
 # ================= STATES =================
 
-class CreateTour(StatesGroup):
-    num = State()
-    price = State()
-    time = State()
-    maxp = State()
-
-class RoomState(StatesGroup):
+class RoomFSM(StatesGroup):
     data = State()
 
-# ================= HELPERS =================
+# ================= HELP =================
 
-def is_owner(user_id: int):
-    return user_id in OWNERS
+def is_owner(uid: int):
+    return uid in OWNERS
 
-# ================= KEYBOARDS =================
+# ================= MENU =================
 
-def menu(is_admin=False):
+def menu(admin=False):
     kb = [
         [InlineKeyboardButton(text="🎮 Турниры", callback_data="list")],
         [InlineKeyboardButton(text="🎟 Участвовать", callback_data="join")]
     ]
-    if is_admin:
+    if admin:
         kb.append([InlineKeyboardButton(text="⚙ Админ", callback_data="admin")])
+
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-
 admin_kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="➕ Создать турнир", callback_data="create")],
-    [InlineKeyboardButton(text="🏠 Рума", callback_data="room")]
+    [InlineKeyboardButton(text="➕ Создать", callback_data="create")],
+    [InlineKeyboardButton(text="📋 Список", callback_data="admin_list")],
+    [InlineKeyboardButton(text="👥 Игроки", callback_data="admin_players")],
+    [InlineKeyboardButton(text="🏠 Рума", callback_data="admin_room")],
+    [InlineKeyboardButton(text="🗑 Удалить", callback_data="admin_delete")]
 ])
 
 # ================= START =================
@@ -109,69 +104,20 @@ async def start(m: Message):
 
 @dp.callback_query(F.data == "list")
 async def list_t(c: CallbackQuery):
-    rows = cursor.execute("SELECT number, price, start_time, room FROM tournaments").fetchall()
+    rows = cursor.execute("SELECT number, price, room FROM tournaments").fetchall()
 
     text = "🎮 Турниры:\n\n"
-    for n, p, t, r in rows:
+    for n, p, r in rows:
         status = "🟢" if r else "🔴"
-        text += f"#{n} | {p}₽ | {t} | {status}\n"
+        text += f"#{n} | {p}₽ | {status}\n"
 
     await c.message.answer(text)
-
-# ================= CREATE =================
-
-@dp.callback_query(F.data == "create")
-async def create(c: CallbackQuery, state: FSMContext):
-    if not is_owner(c.from_user.id):
-        return
-
-    await c.message.answer("Номер турнира:")
-    await state.set_state(CreateTour.num)
-
-@dp.message(CreateTour.num)
-async def c1(m: Message, state: FSMContext):
-    await state.update_data(num=m.text)
-    await m.answer("Цена:")
-    await state.set_state(CreateTour.price)
-
-@dp.message(CreateTour.price)
-async def c2(m: Message, state: FSMContext):
-    await state.update_data(price=m.text)
-    await m.answer("Время (HH:MM):")
-    await state.set_state(CreateTour.time)
-
-@dp.message(CreateTour.time)
-async def c3(m: Message, state: FSMContext):
-    await state.update_data(time=m.text)
-    await m.answer("Макс игроков:")
-    await state.set_state(CreateTour.maxp)
-
-@dp.message(CreateTour.maxp)
-async def c4(m: Message, state: FSMContext):
-    data = await state.get_data()
-
-    cursor.execute("""
-        INSERT OR REPLACE INTO tournaments
-        VALUES (?,?,?,?,?,?)
-    """, (
-        int(data["num"]),
-        int(data["price"]),
-        "",
-        "",
-        data["time"],
-        int(m.text)
-    ))
-
-    conn.commit()
-    await state.clear()
-
-    await m.answer("✅ Турнир создан")
 
 # ================= JOIN =================
 
 @dp.callback_query(F.data == "join")
 async def join(c: CallbackQuery):
-    await c.message.answer("Введи номер турнира:")
+    await c.message.answer("Напиши номер турнира")
 
 @dp.message()
 async def join_handler(m: Message):
@@ -180,18 +126,11 @@ async def join_handler(m: Message):
 
     num = int(m.text)
 
-    cap = cursor.execute(
-        "SELECT max_players FROM tournaments WHERE number=?",
-        (num,)
-    ).fetchone()
-
+    cap = cursor.execute("SELECT max_players FROM tournaments WHERE number=?", (num,)).fetchone()
     if not cap:
         return
 
-    count = cursor.execute(
-        "SELECT COUNT(*) FROM players WHERE tour=?",
-        (num,)
-    ).fetchone()[0]
+    count = cursor.execute("SELECT COUNT(*) FROM players WHERE tour=?", (num,)).fetchone()[0]
 
     if count >= cap[0]:
         return await m.answer("❌ Мест нет")
@@ -199,79 +138,82 @@ async def join_handler(m: Message):
     cursor.execute("INSERT INTO players VALUES (?,?)", (num, m.from_user.id))
     conn.commit()
 
-    await m.answer("🎟 Участие подтверждено")
+    await m.answer("🎟 Участвовал")
+
+# ================= ADMIN =================
+
+@dp.callback_query(F.data == "admin")
+async def admin(c: CallbackQuery):
+    if not is_owner(c.from_user.id):
+        return await c.answer("⛔ нет доступа", show_alert=True)
+
+    await c.message.answer("⚙ ADMIN PANEL", reply_markup=admin_kb)
+
+# ================= CREATE =================
+
+@dp.callback_query(F.data == "create")
+async def create(c: CallbackQuery):
+    await c.message.answer("Создание пока вручную через БД / можно расширить FSM")
+
+# ================= LIST ADMIN =================
+
+@dp.callback_query(F.data == "admin_list")
+async def admin_list(c: CallbackQuery):
+    rows = cursor.execute("SELECT number, price, room, max_players FROM tournaments").fetchall()
+
+    text = "📋 TOURNAMENTS:\n\n"
+    for n, p, r, m in rows:
+        text += f"#{n} | {p}₽ | {m} слотов | {'🟢' if r else '🔴'}\n"
+
+    await c.message.answer(text)
+
+# ================= PLAYERS =================
+
+@dp.callback_query(F.data == "admin_players")
+async def players(c: CallbackQuery):
+    rows = cursor.execute("SELECT tour, user_id FROM players").fetchall()
+
+    text = "👥 PLAYERS:\n\n"
+    for t, u in rows:
+        text += f"{t} → {u}\n"
+
+    await c.message.answer(text)
 
 # ================= ROOM =================
 
-@dp.callback_query(F.data == "room")
+@dp.callback_query(F.data == "admin_room")
 async def room(c: CallbackQuery, state: FSMContext):
-    if not is_owner(c.from_user.id):
-        return
+    await c.message.answer("номер + ссылка")
+    await state.set_state(RoomFSM.data)
 
-    await c.message.answer("номер + ссылка рума")
-    await state.set_state(RoomState.data)
-
-@dp.message(RoomState.data)
-async def save_room(m: Message, state: FSMContext):
+@dp.message(RoomFSM.data)
+async def set_room(m: Message, state: FSMContext):
     num, link = m.text.split(maxsplit=1)
 
-    cursor.execute(
-        "UPDATE tournaments SET room=? WHERE number=?",
-        (link, int(num))
-    )
+    cursor.execute("UPDATE tournaments SET room=? WHERE number=?", (link, int(num)))
     conn.commit()
 
     await state.clear()
     await m.answer("🏠 Рума сохранена")
 
-# ================= TIMER =================
+# ================= DELETE =================
 
-async def scheduler():
-    while True:
-        now = datetime.now()
+@dp.callback_query(F.data == "admin_delete")
+async def del_hint(c: CallbackQuery):
+    await c.message.answer("Напиши номер турнира")
 
-        rows = cursor.execute(
-            "SELECT number, room, start_time FROM tournaments"
-        ).fetchall()
+@dp.message(F.text.regexp(r"^\d+$"))
+async def delete(m: Message):
+    if not is_owner(m.from_user.id):
+        return
 
-        for num, room, t in rows:
-            if not room or not t:
-                continue
+    num = int(m.text)
 
-            try:
-                time = datetime.strptime(t, "%H:%M")
-                target = now.replace(hour=time.hour, minute=time.minute, second=0)
+    cursor.execute("DELETE FROM tournaments WHERE number=?", (num,))
+    cursor.execute("DELETE FROM players WHERE tour=?", (num,))
+    conn.commit()
 
-                # 🔥 за 5 минут
-                if now >= target - timedelta(minutes=5) and now < target - timedelta(minutes=4):
-                    users = cursor.execute(
-                        "SELECT user_id FROM players WHERE tour=?",
-                        (num,)
-                    ).fetchall()
-
-                    for u in users:
-                        try:
-                            await bot.send_message(u[0], f"🏠 РУМА #{num}:\n{room}")
-                        except:
-                            pass
-
-                # 🚀 старт
-                if now >= target and now < target + timedelta(minutes=1):
-                    users = cursor.execute(
-                        "SELECT user_id FROM players WHERE tour=?",
-                        (num,)
-                    ).fetchall()
-
-                    for u in users:
-                        try:
-                            await bot.send_message(u[0], f"🚀 Турнир #{num} стартовал!")
-                        except:
-                            pass
-
-            except:
-                pass
-
-        await asyncio.sleep(30)
+    await m.answer("🗑 удалено")
 
 # ================= WEBHOOK =================
 
@@ -282,9 +224,8 @@ async def handle(request):
     return web.Response(text="ok")
 
 async def on_startup(app):
-    asyncio.create_task(scheduler())
     await bot.set_webhook(WEBHOOK_URL)
-    print("WEBHOOK READY")
+    print("WEBHOOK READY:", WEBHOOK_URL)
 
 async def on_shutdown(app):
     await bot.delete_webhook()
