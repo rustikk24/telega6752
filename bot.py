@@ -15,7 +15,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-# ================= ENV =================
+# ================= CONFIG =================
 
 TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
@@ -65,7 +65,7 @@ conn.commit()
 
 # ================= STATES =================
 
-class TourCreate(StatesGroup):
+class CreateTour(StatesGroup):
     num = State()
     price = State()
     time = State()
@@ -74,29 +74,27 @@ class TourCreate(StatesGroup):
 class RoomState(StatesGroup):
     data = State()
 
-# ================= HELP =================
+# ================= HELPERS =================
 
-def is_owner(uid):
-    return uid in OWNERS
+def is_owner(user_id: int):
+    return user_id in OWNERS
 
 # ================= KEYBOARDS =================
 
-def main_menu(is_admin=False):
+def menu(is_admin=False):
     kb = [
         [InlineKeyboardButton(text="🎮 Турниры", callback_data="list")],
-        [InlineKeyboardButton(text="🎟 Участвовать", callback_data="join")],
+        [InlineKeyboardButton(text="🎟 Участвовать", callback_data="join")]
     ]
     if is_admin:
-        kb.append([InlineKeyboardButton(text="🧑‍💻 Админ", callback_data="admin")])
+        kb.append([InlineKeyboardButton(text="⚙ Админ", callback_data="admin")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def admin_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Турнир", callback_data="create")],
-        [InlineKeyboardButton(text="🏠 Рума", callback_data="room")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-    ])
+admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="➕ Создать турнир", callback_data="create")],
+    [InlineKeyboardButton(text="🏠 Рума", callback_data="room")]
+])
 
 # ================= START =================
 
@@ -105,25 +103,22 @@ async def start(m: Message):
     cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
     conn.commit()
 
-    await m.answer("🎮 Меню", reply_markup=main_menu(is_owner(m.from_user.id)))
+    await m.answer("🎮 Меню", reply_markup=menu(is_owner(m.from_user.id)))
 
 # ================= LIST =================
 
 @dp.callback_query(F.data == "list")
 async def list_t(c: CallbackQuery):
-    rows = cursor.execute(
-        "SELECT number, price, start_time, room FROM tournaments"
-    ).fetchall()
+    rows = cursor.execute("SELECT number, price, start_time, room FROM tournaments").fetchall()
 
     text = "🎮 Турниры:\n\n"
-
     for n, p, t, r in rows:
         status = "🟢" if r else "🔴"
         text += f"#{n} | {p}₽ | {t} | {status}\n"
 
     await c.message.answer(text)
 
-# ================= CREATE TOURNAMENT =================
+# ================= CREATE =================
 
 @dp.callback_query(F.data == "create")
 async def create(c: CallbackQuery, state: FSMContext):
@@ -131,37 +126,38 @@ async def create(c: CallbackQuery, state: FSMContext):
         return
 
     await c.message.answer("Номер турнира:")
-    await state.set_state(TourCreate.num)
+    await state.set_state(CreateTour.num)
 
-@dp.message(TourCreate.num)
-async def num(m: Message, state: FSMContext):
+@dp.message(CreateTour.num)
+async def c1(m: Message, state: FSMContext):
     await state.update_data(num=m.text)
     await m.answer("Цена:")
-    await state.set_state(TourCreate.price)
+    await state.set_state(CreateTour.price)
 
-@dp.message(TourCreate.price)
-async def price(m: Message, state: FSMContext):
+@dp.message(CreateTour.price)
+async def c2(m: Message, state: FSMContext):
     await state.update_data(price=m.text)
     await m.answer("Время (HH:MM):")
-    await state.set_state(TourCreate.time)
+    await state.set_state(CreateTour.time)
 
-@dp.message(TourCreate.time)
-async def time(m: Message, state: FSMContext):
+@dp.message(CreateTour.time)
+async def c3(m: Message, state: FSMContext):
     await state.update_data(time=m.text)
     await m.answer("Макс игроков:")
-    await state.set_state(TourCreate.maxp)
+    await state.set_state(CreateTour.maxp)
 
-@dp.message(TourCreate.maxp)
-async def maxp(m: Message, state: FSMContext):
+@dp.message(CreateTour.maxp)
+async def c4(m: Message, state: FSMContext):
     data = await state.get_data()
 
     cursor.execute("""
         INSERT OR REPLACE INTO tournaments
-        (number, price, start_time, max_players)
-        VALUES (?,?,?,?)
+        VALUES (?,?,?,?,?,?)
     """, (
         int(data["num"]),
         int(data["price"]),
+        "",
+        "",
         data["time"],
         int(m.text)
     ))
@@ -175,7 +171,7 @@ async def maxp(m: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "join")
 async def join(c: CallbackQuery):
-    await c.message.answer("Введите номер турнира:")
+    await c.message.answer("Введи номер турнира:")
 
 @dp.message()
 async def join_handler(m: Message):
@@ -184,12 +180,12 @@ async def join_handler(m: Message):
 
     num = int(m.text)
 
-    tour = cursor.execute(
+    cap = cursor.execute(
         "SELECT max_players FROM tournaments WHERE number=?",
         (num,)
     ).fetchone()
 
-    if not tour:
+    if not cap:
         return
 
     count = cursor.execute(
@@ -197,13 +193,13 @@ async def join_handler(m: Message):
         (num,)
     ).fetchone()[0]
 
-    if count >= tour[0]:
+    if count >= cap[0]:
         return await m.answer("❌ Мест нет")
 
     cursor.execute("INSERT INTO players VALUES (?,?)", (num, m.from_user.id))
     conn.commit()
 
-    await m.answer("🎟 Ты записан!")
+    await m.answer("🎟 Участие подтверждено")
 
 # ================= ROOM =================
 
@@ -212,7 +208,7 @@ async def room(c: CallbackQuery, state: FSMContext):
     if not is_owner(c.from_user.id):
         return
 
-    await c.message.answer("номер + рума")
+    await c.message.answer("номер + ссылка рума")
     await state.set_state(RoomState.data)
 
 @dp.message(RoomState.data)
@@ -228,7 +224,7 @@ async def save_room(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("🏠 Рума сохранена")
 
-# ================= TIMER SYSTEM =================
+# ================= TIMER =================
 
 async def scheduler():
     while True:
@@ -238,17 +234,16 @@ async def scheduler():
             "SELECT number, room, start_time FROM tournaments"
         ).fetchall()
 
-        for num, room, start_time in rows:
-            if not room or not start_time:
+        for num, room, t in rows:
+            if not room or not t:
                 continue
 
             try:
-                t = datetime.strptime(start_time, "%H:%M")
-                target = now.replace(hour=t.hour, minute=t.minute, second=0)
+                time = datetime.strptime(t, "%H:%M")
+                target = now.replace(hour=time.hour, minute=time.minute, second=0)
 
                 # 🔥 за 5 минут
                 if now >= target - timedelta(minutes=5) and now < target - timedelta(minutes=4):
-
                     users = cursor.execute(
                         "SELECT user_id FROM players WHERE tour=?",
                         (num,)
@@ -256,14 +251,11 @@ async def scheduler():
 
                     for u in users:
                         try:
-                            await bot.send_message(
-                                u[0],
-                                f"🏠 РУМА турнира #{num}:\n{room}"
-                            )
+                            await bot.send_message(u[0], f"🏠 РУМА #{num}:\n{room}")
                         except:
                             pass
 
-                # 🚀 старт турнира
+                # 🚀 старт
                 if now >= target and now < target + timedelta(minutes=1):
                     users = cursor.execute(
                         "SELECT user_id FROM players WHERE tour=?",
@@ -272,10 +264,7 @@ async def scheduler():
 
                     for u in users:
                         try:
-                            await bot.send_message(
-                                u[0],
-                                f"🚀 ТУРНИР #{num} СТАРТОВАЛ!"
-                            )
+                            await bot.send_message(u[0], f"🚀 Турнир #{num} стартовал!")
                         except:
                             pass
 
