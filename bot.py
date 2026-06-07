@@ -67,6 +67,9 @@ class JoinFSM(StatesGroup):
 class CreateFSM(StatesGroup):
     data = State()
 
+class RoomFSM(StatesGroup):
+    data = State()
+
 # ================= MENU =================
 
 def menu():
@@ -96,9 +99,9 @@ async def list_t(c: CallbackQuery):
 
     text = "🎮 TOURNAMENTS\n\n"
 
-    for n, p, m, sent in rows:
+    for n, p, cap, sent in rows:
         status = "🏁 RUМА ЕСТЬ" if sent else "🔴 RUМЫ НЕТ"
-        text += f"#{n} | {p}₽ | {m} slots | {status}\n"
+        text += f"#{n} | {p}₽ | {cap} slots | {status}\n"
 
     await c.message.answer(text)
 
@@ -117,7 +120,7 @@ async def join_save(m: Message, state: FSMContext):
     num = int(m.text)
 
     tour = cur.execute("""
-        SELECT price, max_players, card, start_time
+        SELECT price, max_players, card
         FROM tournaments WHERE number=?
     """, (num,)).fetchone()
 
@@ -125,7 +128,7 @@ async def join_save(m: Message, state: FSMContext):
         await state.clear()
         return await m.answer("❌ нет турнира")
 
-    price, cap, card, start = tour
+    price, cap, card = tour
 
     count = cur.execute(
         "SELECT COUNT(*) FROM players WHERE tour=?",
@@ -148,10 +151,10 @@ async def join_save(m: Message, state: FSMContext):
         f"🎟 зарегистрирован\n\n"
         f"💰 К оплате: {price}₽\n"
         f"💳 Карта: {card}\n\n"
-        f"📸 Отправьте чек (скрин)"
+        f"📸 отправьте чек"
     )
 
-# ================= PAYMENT CHECK =================
+# ================= PAYMENT =================
 
 @dp.message(F.photo)
 async def check_payment(m: Message):
@@ -168,8 +171,8 @@ async def check_payment(m: Message):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Принять", callback_data=f"pay_ok:{tour}:{m.from_user.id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"pay_no:{tour}:{m.from_user.id}")
+            InlineKeyboardButton(text="✅ принять", callback_data=f"pay_ok:{tour}:{m.from_user.id}"),
+            InlineKeyboardButton(text="❌ отклонить", callback_data=f"pay_no:{tour}:{m.from_user.id}")
         ]
     ])
 
@@ -177,13 +180,11 @@ async def check_payment(m: Message):
         await bot.send_photo(
             owner,
             m.photo[-1].file_id,
-            caption=f"💳 ЧЕК\nТурнир #{tour}\nUser: {m.from_user.id}",
+            caption=f"💳 ЧЕК #{tour}\nUser: {m.from_user.id}",
             reply_markup=kb
         )
 
-    await m.answer("⏳ чек отправлен на проверку")
-
-# ================= PAYMENT DECISION =================
+    await m.answer("⏳ чек отправлен")
 
 @dp.callback_query(F.data.startswith("pay_ok"))
 async def pay_ok(c: CallbackQuery):
@@ -196,8 +197,7 @@ async def pay_ok(c: CallbackQuery):
 
     conn.commit()
 
-    await bot.send_message(int(uid), "✅ Оплата подтверждена!")
-
+    await bot.send_message(int(uid), "✅ оплата принята")
     await c.answer("ok")
 
 @dp.callback_query(F.data.startswith("pay_no"))
@@ -206,7 +206,7 @@ async def pay_no(c: CallbackQuery):
 
     await bot.send_message(
         int(uid),
-        "❌ Чек не принят\n\nОтправьте корректный чек"
+        "❌ чек не принят, отправьте корректный"
     )
 
     await c.answer("rejected")
@@ -216,42 +216,79 @@ async def pay_no(c: CallbackQuery):
 @dp.callback_query(F.data == "admin")
 async def admin(c: CallbackQuery):
     if c.from_user.id not in OWNERS:
-        return await c.answer("⛔")
+        return await c.answer("⛔", show_alert=True)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ создать", callback_data="create")],
         [InlineKeyboardButton(text="📋 турниры", callback_data="adm_list")],
         [InlineKeyboardButton(text="👥 игроки", callback_data="adm_players")],
-        [InlineKeyboardButton(text="🏠 рума вручную", callback_data="room")]
+        [InlineKeyboardButton(text="🗑 удалить", callback_data="delete_menu")],
+        [InlineKeyboardButton(text="🏠 рума", callback_data="room")]
     ])
 
-    await c.message.answer("⚙ ADMIN PANEL", reply_markup=kb)
+    await c.message.answer("⚙ ADMIN", reply_markup=kb)
 
-# ================= ADMIN LIST =================
+# ================= CREATE =================
 
-@dp.callback_query(F.data == "adm_list")
-async def adm_list(c: CallbackQuery):
-    rows = cur.execute("SELECT number, price, max_players FROM tournaments").fetchall()
+@dp.callback_query(F.data == "create")
+async def create(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id not in OWNERS:
+        return
 
-    text = "📋 TOURNAMENTS\n\n"
-    for n, p, m in rows:
-        text += f"#{n} | {p}₽ | {m} slots\n"
+    await state.set_state(CreateFSM.data)
+    await c.message.answer("номер цена лимит карта старт(сек)")
 
-    await c.message.answer(text)
+@dp.message(CreateFSM.data)
+async def create_save(m: Message, state: FSMContext):
+    try:
+        n, p, cap, card, t = m.text.split()
 
-# ================= PLAYERS =================
+        cur.execute("""
+            INSERT OR REPLACE INTO tournaments
+            VALUES (?,?,?,?,?,?,0)
+        """, (
+            int(n),
+            int(p),
+            int(cap),
+            card,
+            "",
+            int(time.time()) + int(t)
+        ))
 
-@dp.callback_query(F.data == "adm_players")
-async def adm_players(c: CallbackQuery):
-    rows = cur.execute("SELECT tour, user_id, paid FROM players").fetchall()
+        conn.commit()
+        await m.answer("✅ создано")
 
-    text = "👥 PLAYERS\n\n"
-    for t, u, p in rows:
-        text += f"{t} → {u} | {'paid' if p else 'no'}\n"
+    except:
+        await m.answer("❌ формат неверный")
 
-    await c.message.answer(text)
+    await state.clear()
 
-# ================= ROOM SEND =================
+# ================= DELETE =================
+
+@dp.callback_query(F.data == "delete_menu")
+async def delete_menu(c: CallbackQuery):
+    rows = cur.execute("SELECT number, price FROM tournaments").fetchall()
+
+    kb = []
+    for n, p in rows:
+        kb.append([
+            InlineKeyboardButton(text=f"#{n} | {p}₽ ❌", callback_data=f"del:{n}")
+        ])
+
+    await c.message.answer("🗑 удалить:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+@dp.callback_query(F.data.startswith("del:"))
+async def delete_t(c: CallbackQuery):
+    num = int(c.data.split(":")[1])
+
+    cur.execute("DELETE FROM tournaments WHERE number=?", (num,))
+    cur.execute("DELETE FROM players WHERE tour=?", (num,))
+    conn.commit()
+
+    await c.answer("удалено", show_alert=True)
+    await c.message.edit_text("🗑 удалено")
+
+# ================= ROOM =================
 
 async def send_room(tour, room):
     users = cur.execute("""
@@ -264,8 +301,6 @@ async def send_room(tour, room):
             await bot.send_message(u[0], f"🏁 RUМА #{tour}\n\n{room}")
         except:
             pass
-
-# ================= MANUAL ROOM =================
 
 class RoomFSM(StatesGroup):
     data = State()
@@ -280,17 +315,17 @@ async def room_save(m: Message, state: FSMContext):
     n, room = m.text.split(maxsplit=1)
 
     cur.execute("""
-        UPDATE tournaments SET room=?, room_sent=1
+        UPDATE tournaments
+        SET room=?, room_sent=1
         WHERE number=?
     """, (room, int(n)))
 
     conn.commit()
 
-    await state.clear()
-
     await send_room(int(n), room)
 
-    await m.answer("🏁 рума отправлена")
+    await state.clear()
+    await m.answer("🏁 отправлено")
 
 # ================= WEBHOOK =================
 
