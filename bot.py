@@ -62,14 +62,14 @@ conn.commit()
 
 # ================= FSM =================
 
-class AddTour(StatesGroup):
+class JoinFSM(StatesGroup):
+    tour = State()
+
+class AddTourFSM(StatesGroup):
     data = State()
 
-class BanUser(StatesGroup):
+class BanFSM(StatesGroup):
     uid = State()
-
-class JoinTour(StatesGroup):
-    tour = State()
 
 # ================= HELPERS =================
 
@@ -99,14 +99,26 @@ async def start(m: Message):
 
     await m.answer("🎮 MENU", reply_markup=menu())
 
+# ================= LIST =================
+
+@dp.callback_query(F.data == "list")
+async def list_t(c: CallbackQuery):
+    rows = cur.execute("SELECT number, price, max_players FROM tournaments").fetchall()
+
+    text = "🎮 TOURNAMENTS\n\n"
+    for n, p, m in rows:
+        text += f"#{n} | {p}₽ | {m} slots\n"
+
+    await c.message.answer(text)
+
 # ================= JOIN =================
 
 @dp.callback_query(F.data == "join")
 async def join(c: CallbackQuery, state: FSMContext):
-    await state.set_state(JoinTour.tour)
+    await state.set_state(JoinFSM.tour)
     await c.message.answer("Введи номер турнира")
 
-@dp.message(JoinTour.tour)
+@dp.message(JoinFSM.tour)
 async def join_save(m: Message, state: FSMContext):
     if not m.text.isdigit():
         return await m.answer("❌ число")
@@ -130,18 +142,6 @@ async def join_save(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("✅ joined")
 
-# ================= LIST =================
-
-@dp.callback_query(F.data == "list")
-async def list_t(c: CallbackQuery):
-    rows = cur.execute("SELECT number, price, max_players FROM tournaments").fetchall()
-
-    text = "🎮 TOURNAMENTS\n\n"
-    for n, p, m in rows:
-        text += f"#{n} | {p}₽ | {m} slots\n"
-
-    await c.message.answer(text)
-
 # ================= ADMIN PANEL =================
 
 @dp.callback_query(F.data == "admin")
@@ -151,13 +151,13 @@ async def admin(c: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Создать турнир", callback_data="add")],
-        [InlineKeyboardButton(text="🗑 Удалить турнир", callback_data="del")],
+        [InlineKeyboardButton(text="🗑 Удалить турнир", callback_data="del_list")],
         [InlineKeyboardButton(text="📋 Турниры", callback_data="adm_list")],
         [InlineKeyboardButton(text="👥 Игроки", callback_data="adm_players")],
         [InlineKeyboardButton(text="🚫 Бан", callback_data="ban")]
     ])
 
-    await c.message.answer("⚙ <b>ADMIN PANEL</b>", reply_markup=kb)
+    await c.message.answer("⚙ ADMIN PANEL", reply_markup=kb)
 
 # ================= ADD TOURNAMENT =================
 
@@ -165,10 +165,10 @@ async def admin(c: CallbackQuery):
 async def add(c: CallbackQuery, state: FSMContext):
     if c.from_user.id not in OWNERS:
         return
-    await state.set_state(AddTour.data)
+    await state.set_state(AddTourFSM.data)
     await c.message.answer("Введи: номер цена слоты")
 
-@dp.message(AddTour.data)
+@dp.message(AddTourFSM.data)
 async def add_save(m: Message, state: FSMContext):
     try:
         n, p, s = map(int, m.text.split())
@@ -182,40 +182,39 @@ async def add_save(m: Message, state: FSMContext):
 
     await state.clear()
 
-# ================= DELETE =================
+# ================= DELETE LIST (BUTTONS) =================
 
-@dp.callback_query(F.data == "del")
-async def del_hint(c: CallbackQuery, state: FSMContext):
-    await state.set_state(AddTour.data)
-    await c.message.answer("Введи номер турнира")
+@dp.callback_query(F.data == "del_list")
+async def del_list(c: CallbackQuery):
+    if c.from_user.id not in OWNERS:
+        return await c.answer("⛔ no access", show_alert=True)
 
-@dp.message(AddTour.data)
-async def del_run(m: Message, state: FSMContext):
-    if m.from_user.id not in OWNERS:
-        return
+    rows = cur.execute("SELECT number, price FROM tournaments").fetchall()
 
-    if m.text.isdigit():
-        n = int(m.text)
+    kb = []
+    for n, p in rows:
+        kb.append([
+            InlineKeyboardButton(text=f"#{n} | {p}₽ ❌", callback_data=f"del:{n}")
+        ])
 
-        cur.execute("DELETE FROM tournaments WHERE number=?", (n,))
-        cur.execute("DELETE FROM players WHERE tour=?", (n,))
-        conn.commit()
+    await c.message.answer(
+        "🗑 УДАЛЕНИЕ ТУРНИРОВ",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
 
-        await m.answer("🗑 удалено")
+@dp.callback_query(F.data.startswith("del:"))
+async def delete_t(c: CallbackQuery):
+    if c.from_user.id not in OWNERS:
+        return await c.answer("⛔ no access", show_alert=True)
 
-    await state.clear()
+    num = int(c.data.split(":")[1])
 
-# ================= ADM LIST =================
+    cur.execute("DELETE FROM tournaments WHERE number=?", (num,))
+    cur.execute("DELETE FROM players WHERE tour=?", (num,))
+    conn.commit()
 
-@dp.callback_query(F.data == "adm_list")
-async def adm_list(c: CallbackQuery):
-    rows = cur.execute("SELECT number, price, max_players FROM tournaments").fetchall()
-
-    text = "📋 TOURNAMENTS\n\n"
-    for r in rows:
-        text += f"#{r[0]} | {r[1]}₽ | {r[2]} slots\n"
-
-    await c.message.answer(text)
+    await c.answer("🗑 удалено", show_alert=True)
+    await c.message.edit_text("✅ удалено")
 
 # ================= PLAYERS =================
 
@@ -229,14 +228,26 @@ async def adm_players(c: CallbackQuery):
 
     await c.message.answer(text)
 
+# ================= LIST ADMIN =================
+
+@dp.callback_query(F.data == "adm_list")
+async def adm_list(c: CallbackQuery):
+    rows = cur.execute("SELECT number, price, max_players FROM tournaments").fetchall()
+
+    text = "📋 TOURNAMENTS\n\n"
+    for n, p, s in rows:
+        text += f"#{n} | {p}₽ | {s} slots\n"
+
+    await c.message.answer(text)
+
 # ================= BAN =================
 
 @dp.callback_query(F.data == "ban")
 async def ban_start(c: CallbackQuery, state: FSMContext):
-    await state.set_state(BanUser.uid)
+    await state.set_state(BanFSM.uid)
     await c.message.answer("ID для бана")
 
-@dp.message(BanUser.uid)
+@dp.message(BanFSM.uid)
 async def ban_save(m: Message, state: FSMContext):
     if not m.text.isdigit():
         return await m.answer("ID число")
@@ -266,13 +277,9 @@ async def debug(m: Message):
 # ================= WEBHOOK =================
 
 async def handle(request):
-    try:
-        data = await request.json()
-        update = types.Update.model_validate(data)
-        await dp.feed_update(bot, update)
-    except Exception as e:
-        print("ERR:", e)
-
+    data = await request.json()
+    update = types.Update.model_validate(data)
+    await dp.feed_update(bot, update)
     return web.Response(text="ok")
 
 async def index(request):
