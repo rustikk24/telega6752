@@ -2,6 +2,7 @@ import asyncio
 import time
 import sqlite3
 import os
+from datetime import datetime, timedelta
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
@@ -204,10 +205,7 @@ async def pay_ok(c: CallbackQuery):
 async def pay_no(c: CallbackQuery):
     _, tour, uid = c.data.split(":")
 
-    await bot.send_message(
-        int(uid),
-        "❌ чек не принят, отправьте корректный"
-    )
+    await bot.send_message(int(uid), "❌ чек отклонён, отправьте корректный")
 
     await c.answer("rejected")
 
@@ -236,30 +234,43 @@ async def create(c: CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(CreateFSM.data)
-    await c.message.answer("номер цена лимит карта старт(сек)")
+    await c.message.answer(
+        "Формат:\n\n"
+        "номер цена лимит карта(16 цифр) время(HH:MM)"
+    )
 
 @dp.message(CreateFSM.data)
 async def create_save(m: Message, state: FSMContext):
     try:
-        n, p, cap, card, t = m.text.split()
+        parts = m.text.split()
+
+        n = int(parts[0])
+        p = int(parts[1])
+        cap = int(parts[2])
+        time_str = parts[-1]
+        card = " ".join(parts[3:-1])
+
+        now = datetime.now()
+        h, mm = map(int, time_str.split(":"))
+
+        start = now.replace(hour=h, minute=mm, second=0, microsecond=0)
+
+        if start < now:
+            start += timedelta(days=1)
+
+        start_ts = int(start.timestamp())
 
         cur.execute("""
             INSERT OR REPLACE INTO tournaments
             VALUES (?,?,?,?,?,?,0)
-        """, (
-            int(n),
-            int(p),
-            int(cap),
-            card,
-            "",
-            int(time.time()) + int(t)
-        ))
+        """, (n, p, cap, card, "", start_ts))
 
         conn.commit()
-        await m.answer("✅ создано")
+
+        await m.answer("✅ турнир создан")
 
     except:
-        await m.answer("❌ формат неверный")
+        await m.answer("❌ ошибка формата")
 
     await state.clear()
 
@@ -269,11 +280,10 @@ async def create_save(m: Message, state: FSMContext):
 async def delete_menu(c: CallbackQuery):
     rows = cur.execute("SELECT number, price FROM tournaments").fetchall()
 
-    kb = []
-    for n, p in rows:
-        kb.append([
-            InlineKeyboardButton(text=f"#{n} | {p}₽ ❌", callback_data=f"del:{n}")
-        ])
+    kb = [
+        [InlineKeyboardButton(text=f"#{n} | {p}₽ ❌", callback_data=f"del:{n}")]
+        for n, p in rows
+    ]
 
     await c.message.answer("🗑 удалить:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
@@ -315,8 +325,7 @@ async def room_save(m: Message, state: FSMContext):
     n, room = m.text.split(maxsplit=1)
 
     cur.execute("""
-        UPDATE tournaments
-        SET room=?, room_sent=1
+        UPDATE tournaments SET room=?, room_sent=1
         WHERE number=?
     """, (room, int(n)))
 
