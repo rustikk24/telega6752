@@ -6,10 +6,14 @@ from datetime import datetime, timedelta
 
 from aiohttp import web
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, Update, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.types import Message, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 # ================= ENV =================
 
@@ -17,8 +21,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 OWNERS = set(int(x) for x in os.getenv("OWNERS", "").split(",") if x.strip().isdigit())
 
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = BASE_URL + WEBHOOK_PATH
+WEBHOOK_URL = BASE_URL + "/webhook"
 
 # ================= BOT =================
 
@@ -27,12 +30,23 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 
 # ================= DB =================
 
 conn = sqlite3.connect("db.sqlite3", check_same_thread=False)
 cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS tournaments (
+    number INTEGER PRIMARY KEY,
+    price INTEGER,
+    card TEXT,
+    room TEXT,
+    start_time TEXT,
+    max_players INTEGER DEFAULT 10
+)
+""")
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
@@ -41,33 +55,48 @@ CREATE TABLE IF NOT EXISTS users (
 """)
 
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS tournaments (
-    number INTEGER PRIMARY KEY,
-    price INTEGER,
-    max_players INTEGER,
-    bank TEXT,
-    card TEXT,
-    room TEXT,
-    start_time TEXT,
-    room_sent INTEGER DEFAULT 0
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS registrations (
-    user_id INTEGER,
-    tournament_id INTEGER,
-    paid INTEGER DEFAULT 0,
-    PRIMARY KEY(user_id, tournament_id)
+CREATE TABLE IF NOT EXISTS players (
+    tour INTEGER,
+    user_id INTEGER
 )
 """)
 
 conn.commit()
 
+# ================= STATES =================
+
+class TourCreate(StatesGroup):
+    num = State()
+    price = State()
+    time = State()
+    maxp = State()
+
+class RoomState(StatesGroup):
+    data = State()
+
 # ================= HELP =================
 
-def is_owner(uid: int):
+def is_owner(uid):
     return uid in OWNERS
+
+# ================= KEYBOARDS =================
+
+def main_menu(is_admin=False):
+    kb = [
+        [InlineKeyboardButton(text="🎮 Турниры", callback_data="list")],
+        [InlineKeyboardButton(text="🎟 Участвовать", callback_data="join")],
+    ]
+    if is_admin:
+        kb.append([InlineKeyboardButton(text="🧑‍💻 Админ", callback_data="admin")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def admin_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Турнир", callback_data="create")],
+        [InlineKeyboardButton(text="🏠 Рума", callback_data="room")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+    ])
 
 # ================= START =================
 
@@ -75,220 +104,183 @@ def is_owner(uid: int):
 async def start(m: Message):
     cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
     conn.commit()
-    await m.answer("🤖 Бот турниров активен")
 
-# ================= TOUR =================
-
-@dp.message(F.text.startswith("/tour"))
-async def tour(m: Message):
-    if not is_owner(m.from_user.id):
-        return
-
-    _, num, price, limit, date, time = m.text.split()
-
-    start_time = f"{date} {time}"
-
-    cursor.execute("""
-    INSERT OR REPLACE INTO tournaments
-    (number, price, max_players, start_time)
-    VALUES (?, ?, ?, ?)
-    """, (int(num), int(price), int(limit), start_time))
-
-    conn.commit()
-    await m.answer("🎮 Турнир создан")
+    await m.answer("🎮 Меню", reply_markup=main_menu(is_owner(m.from_user.id)))
 
 # ================= LIST =================
 
-@dp.message(F.text == "/list")
-async def list_t(m: Message):
-    rows = cursor.execute("SELECT number, price, max_players, room FROM tournaments").fetchall()
+@dp.callback_query(F.data == "list")
+async def list_t(c: CallbackQuery):
+    rows = cursor.execute(
+        "SELECT number, price, start_time, room FROM tournaments"
+    ).fetchall()
 
-    if not rows:
-        return await m.answer("Нет турниров")
+    text = "🎮 Турниры:\n\n"
 
-    text = "🎮 Турниры\n\n"
+    for n, p, t, r in rows:
+        status = "🟢" if r else "🔴"
+        text += f"#{n} | {p}₽ | {t} | {status}\n"
 
-    for num, price, maxp, room in rows:
+    await c.message.answer(text)
 
-        cnt = cursor.execute(
-            "SELECT COUNT(*) FROM registrations WHERE tournament_id=?",
-            (num,)
-        ).fetchone()[0]
+# ================= CREATE TOURNAMENT =================
 
-        room_status = "🟢" if room else "🔴"
+@dp.callback_query(F.data == "create")
+async def create(c: CallbackQuery, state: FSMContext):
+    if not is_owner(c.from_user.id):
+        return
 
-        text += (
-            f"#{num}\n"
-            f"💰 {price}₽\n"
-            f"👥 {cnt}/{maxp}\n"
-            f"🏠 Рума: {room_status}\n\n"
-        )
+    await c.message.answer("Номер турнира:")
+    await state.set_state(TourCreate.num)
 
-    await m.answer(text)
+@dp.message(TourCreate.num)
+async def num(m: Message, state: FSMContext):
+    await state.update_data(num=m.text)
+    await m.answer("Цена:")
+    await state.set_state(TourCreate.price)
+
+@dp.message(TourCreate.price)
+async def price(m: Message, state: FSMContext):
+    await state.update_data(price=m.text)
+    await m.answer("Время (HH:MM):")
+    await state.set_state(TourCreate.time)
+
+@dp.message(TourCreate.time)
+async def time(m: Message, state: FSMContext):
+    await state.update_data(time=m.text)
+    await m.answer("Макс игроков:")
+    await state.set_state(TourCreate.maxp)
+
+@dp.message(TourCreate.maxp)
+async def maxp(m: Message, state: FSMContext):
+    data = await state.get_data()
+
+    cursor.execute("""
+        INSERT OR REPLACE INTO tournaments
+        (number, price, start_time, max_players)
+        VALUES (?,?,?,?)
+    """, (
+        int(data["num"]),
+        int(data["price"]),
+        data["time"],
+        int(m.text)
+    ))
+
+    conn.commit()
+    await state.clear()
+
+    await m.answer("✅ Турнир создан")
 
 # ================= JOIN =================
 
-@dp.message(F.text.startswith("/join"))
-async def join(m: Message):
-    _, num = m.text.split()
-    num = int(num)
+@dp.callback_query(F.data == "join")
+async def join(c: CallbackQuery):
+    await c.message.answer("Введите номер турнира:")
 
-    t = cursor.execute(
-        "SELECT price, max_players FROM tournaments WHERE number=?",
+@dp.message()
+async def join_handler(m: Message):
+    if not m.text.isdigit():
+        return
+
+    num = int(m.text)
+
+    tour = cursor.execute(
+        "SELECT max_players FROM tournaments WHERE number=?",
         (num,)
     ).fetchone()
 
-    if not t:
-        return await m.answer("Турнир не найден")
+    if not tour:
+        return
 
-    price, maxp = t
-
-    cnt = cursor.execute(
-        "SELECT COUNT(*) FROM registrations WHERE tournament_id=?",
+    count = cursor.execute(
+        "SELECT COUNT(*) FROM players WHERE tour=?",
         (num,)
     ).fetchone()[0]
 
-    if cnt >= maxp:
-        return await m.answer("❌ Лимит игроков")
+    if count >= tour[0]:
+        return await m.answer("❌ Мест нет")
 
-    cursor.execute(
-        "INSERT OR IGNORE INTO registrations VALUES (?, ?, 0)",
-        (m.from_user.id, num)
-    )
-
+    cursor.execute("INSERT INTO players VALUES (?,?)", (num, m.from_user.id))
     conn.commit()
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📸 Отправить чек", callback_data=f"pay_{num}")
-    ]])
-
-    await m.answer(
-        f"🎮 Турнир #{num}\n💰 {price}₽\n\nОтправьте чек оплаты",
-        reply_markup=kb
-    )
-
-# ================= PAYMENT BUTTON =================
-
-@dp.callback_query(F.data.startswith("pay_"))
-async def pay(call: CallbackQuery):
-    num = int(call.data.split("_")[1])
-
-    owners_list = "\n".join(str(x) for x in OWNERS)
-
-    await bot.send_message(
-        list(OWNERS)[0],
-        f"💳 Чек\nUser: {call.from_user.id}\nTournament: {num}"
-    )
-
-    await call.message.answer("📤 Чек отправлен администратору")
-
-# ================= CARD =================
-
-@dp.message(F.text.startswith("/card"))
-async def card(m: Message):
-    if not is_owner(m.from_user.id):
-        return
-
-    _, num, bank, card = m.text.split(maxsplit=3)
-
-    cursor.execute("""
-    UPDATE tournaments
-    SET bank=?, card=?
-    WHERE number=?
-    """, (bank, card, int(num)))
-
-    conn.commit()
-
-    await m.answer("💳 Карта обновлена")
+    await m.answer("🎟 Ты записан!")
 
 # ================= ROOM =================
 
-@dp.message(F.text.startswith("/room"))
-async def room(m: Message):
-    if not is_owner(m.from_user.id):
+@dp.callback_query(F.data == "room")
+async def room(c: CallbackQuery, state: FSMContext):
+    if not is_owner(c.from_user.id):
         return
 
-    _, num, link = m.text.split(maxsplit=2)
+    await c.message.answer("номер + рума")
+    await state.set_state(RoomState.data)
 
-    cursor.execute("""
-    UPDATE tournaments
-    SET room=?
-    WHERE number=?
-    """, (link, int(num)))
+@dp.message(RoomState.data)
+async def save_room(m: Message, state: FSMContext):
+    num, link = m.text.split(maxsplit=1)
 
+    cursor.execute(
+        "UPDATE tournaments SET room=? WHERE number=?",
+        (link, int(num))
+    )
     conn.commit()
 
-    await m.answer("🏠 Рума задана")
+    await state.clear()
+    await m.answer("🏠 Рума сохранена")
 
-# ================= DELETE =================
+# ================= TIMER SYSTEM =================
 
-@dp.message(F.text.startswith("/delete"))
-async def delete(m: Message):
-    if not is_owner(m.from_user.id):
-        return
-
-    _, num = m.text.split()
-
-    cursor.execute("DELETE FROM tournaments WHERE number=?", (int(num),))
-    cursor.execute("DELETE FROM registrations WHERE tournament_id=?", (int(num),))
-    conn.commit()
-
-    await m.answer("🗑 Удалено")
-
-# ================= SEND =================
-
-@dp.message(F.text.startswith("/send"))
-async def send(m: Message):
-    if not is_owner(m.from_user.id):
-        return
-
-    text = m.text.replace("/send", "").strip()
-
-    users = cursor.execute("SELECT user_id FROM users").fetchall()
-
-    for u in users:
-        try:
-            await bot.send_message(u[0], text)
-        except:
-            pass
-
-    await m.answer("📢 Отправлено")
-
-# ================= AUTO ROOM =================
-
-async def room_sender():
+async def scheduler():
     while True:
         now = datetime.now()
 
-        rows = cursor.execute("SELECT number, start_time, room, room_sent FROM tournaments").fetchall()
+        rows = cursor.execute(
+            "SELECT number, room, start_time FROM tournaments"
+        ).fetchall()
 
-        for num, start_time, room, sent in rows:
-            if not room or sent:
+        for num, room, start_time in rows:
+            if not room or not start_time:
                 continue
 
             try:
-                dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M")
+                t = datetime.strptime(start_time, "%H:%M")
+                target = now.replace(hour=t.hour, minute=t.minute, second=0)
+
+                # 🔥 за 5 минут
+                if now >= target - timedelta(minutes=5) and now < target - timedelta(minutes=4):
+
+                    users = cursor.execute(
+                        "SELECT user_id FROM players WHERE tour=?",
+                        (num,)
+                    ).fetchall()
+
+                    for u in users:
+                        try:
+                            await bot.send_message(
+                                u[0],
+                                f"🏠 РУМА турнира #{num}:\n{room}"
+                            )
+                        except:
+                            pass
+
+                # 🚀 старт турнира
+                if now >= target and now < target + timedelta(minutes=1):
+                    users = cursor.execute(
+                        "SELECT user_id FROM players WHERE tour=?",
+                        (num,)
+                    ).fetchall()
+
+                    for u in users:
+                        try:
+                            await bot.send_message(
+                                u[0],
+                                f"🚀 ТУРНИР #{num} СТАРТОВАЛ!"
+                            )
+                        except:
+                            pass
+
             except:
-                continue
-
-            if now >= dt - timedelta(minutes=5):
-
-                users = cursor.execute(
-                    "SELECT user_id FROM registrations WHERE tournament_id=?",
-                    (num,)
-                ).fetchall()
-
-                for u in users:
-                    try:
-                        await bot.send_message(u[0], f"🚨 Рума:\n{room}")
-                    except:
-                        pass
-
-                cursor.execute(
-                    "UPDATE tournaments SET room_sent=1 WHERE number=?",
-                    (num,)
-                )
-                conn.commit()
+                pass
 
         await asyncio.sleep(30)
 
@@ -296,18 +288,20 @@ async def room_sender():
 
 async def handle(request):
     data = await request.json()
-    update = Update.model_validate(data)
+    update = types.Update.model_validate(data)
     await dp.feed_update(bot, update)
     return web.Response(text="ok")
 
 async def on_startup(app):
+    asyncio.create_task(scheduler())
     await bot.set_webhook(WEBHOOK_URL)
-    asyncio.create_task(room_sender())
-    print("Webhook set")
+    print("WEBHOOK READY")
 
 async def on_shutdown(app):
     await bot.delete_webhook()
     await bot.session.close()
+
+# ================= APP =================
 
 app = web.Application()
 app.router.add_post("/webhook", handle)
@@ -315,7 +309,7 @@ app.router.add_post("/webhook", handle)
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
-# ================= MAIN =================
+# ================= RUN =================
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
