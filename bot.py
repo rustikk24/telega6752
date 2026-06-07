@@ -11,19 +11,17 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 
 # ================= CONFIG =================
-
-DEBUG_MODE = True
-START_TIME = time.time()
 
 TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 OWNERS = set(int(x) for x in os.getenv("OWNERS", "").split(",") if x.strip().isdigit())
 
 WEBHOOK_URL = (BASE_URL or "") + "/webhook"
+START_TIME = time.time()
 
 # ================= BOT =================
 
@@ -34,12 +32,6 @@ bot = Bot(
 
 dp = Dispatcher(storage=MemoryStorage())
 
-# ================= LOG =================
-
-def log(msg):
-    if DEBUG_MODE:
-        print(f"[DEBUG] {msg}")
-
 # ================= DB =================
 
 conn = sqlite3.connect("db.sqlite3", check_same_thread=False)
@@ -49,8 +41,7 @@ cur.execute("""
 CREATE TABLE IF NOT EXISTS tournaments (
     number INTEGER PRIMARY KEY,
     price INTEGER,
-    max_players INTEGER DEFAULT 10,
-    room TEXT DEFAULT ''
+    max_players INTEGER DEFAULT 10
 )
 """)
 
@@ -71,179 +62,160 @@ conn.commit()
 
 # ================= FSM =================
 
-class RoomFSM(StatesGroup):
-    data = State()
+class JoinFSM(StatesGroup):
+    tour = State()
+
+class BanFSM(StatesGroup):
+    user = State()
 
 # ================= HELPERS =================
 
 def is_owner(uid: int):
     return uid in OWNERS
 
-# ================= KEYBOARD =================
-
-def menu(admin=False):
-    kb = [
-        [InlineKeyboardButton(text="🎮 Турниры", callback_data="list")],
-        [InlineKeyboardButton(text="🎟 Участвовать", callback_data="join")],
-        [InlineKeyboardButton(text="🛡 Модерация", callback_data="mod")],
-        [InlineKeyboardButton(text="🧠 Debug", callback_data="debug_btn")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-# ================= START =================
-
-@dp.message(F.text == "/start")
-async def start(m: Message):
-    log(f"START {m.from_user.id}")
-
-    if await is_banned(m.from_user.id):
-        return await m.answer("⛔ banned")
-
-    await m.answer("🎮 MENU", reply_markup=menu(is_owner(m.from_user.id)))
-
-# ================= BAN CHECK =================
-
 async def is_banned(uid: int):
     c = conn.cursor()
     c.execute("SELECT 1 FROM bans WHERE user_id=?", (uid,))
     return c.fetchone() is not None
 
-# ================= TOURNAMENT LIST =================
+# ================= MENU =================
+
+def menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎮 Турниры", callback_data="list")],
+        [InlineKeyboardButton(text="🎟 Участвовать", callback_data="join")],
+        [InlineKeyboardButton(text="🛡 Модерация", callback_data="mod")],
+        [InlineKeyboardButton(text="🧠 Debug", callback_data="debug")]
+    ])
+
+# ================= START =================
+
+@dp.message(F.text == "/start")
+async def start(m: Message):
+    if await is_banned(m.from_user.id):
+        return await m.answer("⛔ banned")
+
+    await m.answer("🎮 MENU", reply_markup=menu())
+
+# ================= LIST =================
 
 @dp.callback_query(F.data == "list")
 async def list_t(c: CallbackQuery):
-    rows = cur.execute("SELECT number, price, room FROM tournaments").fetchall()
+    rows = cur.execute("SELECT number, price FROM tournaments").fetchall()
 
     text = "🎮 TOURNAMENTS\n\n"
-    for n, p, r in rows:
-        text += f"#{n} | {p}₽ | {'🟢' if r else '🔴'}\n"
+    for n, p in rows:
+        text += f"#{n} | {p}₽\n"
 
     await c.message.answer(text)
 
-# ================= JOIN =================
+# ================= JOIN (FSM) =================
 
 @dp.callback_query(F.data == "join")
-async def join(c: CallbackQuery):
+async def join_start(c: CallbackQuery, state: FSMContext):
+    await state.set_state(JoinFSM.tour)
     await c.message.answer("Введи номер турнира")
 
-@dp.message(F.text.regexp(r"^\d+$"))
-async def join_handler(m: Message):
+@dp.message(JoinFSM.tour)
+async def join_finish(m: Message, state: FSMContext):
     if await is_banned(m.from_user.id):
         return
+
+    if not m.text.isdigit():
+        return await m.answer("Введите число")
 
     num = int(m.text)
 
     cap = cur.execute("SELECT max_players FROM tournaments WHERE number=?", (num,)).fetchone()
     if not cap:
-        return
+        await state.clear()
+        return await m.answer("❌ нет турнира")
 
     count = cur.execute("SELECT COUNT(*) FROM players WHERE tour=?", (num,)).fetchone()[0]
 
     if count >= cap[0]:
+        await state.clear()
         return await m.answer("❌ full")
 
     cur.execute("INSERT INTO players VALUES (?,?)", (num, m.from_user.id))
     conn.commit()
 
+    await state.clear()
     await m.answer("✅ joined")
 
-# ================= MODERATION =================
+# ================= MOD =================
 
 @dp.callback_query(F.data == "mod")
-async def mod_menu(c: CallbackQuery):
+async def mod(c: CallbackQuery):
     if not is_owner(c.from_user.id):
         return await c.answer("⛔", show_alert=True)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚫 Ban", callback_data="ban")],
-        [InlineKeyboardButton(text="✅ Unban", callback_data="unban")]
+        [InlineKeyboardButton(text="🚫 Ban", callback_data="ban")]
     ])
 
     await c.message.answer("🛡 MOD", reply_markup=kb)
 
-# ================= BAN =================
+# ================= BAN (FSM FIX) =================
 
 @dp.callback_query(F.data == "ban")
-async def ban_hint(c: CallbackQuery):
-    await c.message.answer("send user id")
+async def ban_start(c: CallbackQuery, state: FSMContext):
+    await state.set_state(BanFSM.user)
+    await c.message.answer("Введи ID пользователя")
 
-@dp.message(F.text.regexp(r"^\d+$"))
-async def ban_user(m: Message):
+@dp.message(BanFSM.user)
+async def ban_finish(m: Message, state: FSMContext):
     if not is_owner(m.from_user.id):
         return
+
+    if not m.text.isdigit():
+        return await m.answer("ID должен быть числом")
 
     uid = int(m.text)
 
     cur.execute("INSERT OR IGNORE INTO bans VALUES (?)", (uid,))
     conn.commit()
 
+    await state.clear()
     await m.answer("🚫 banned")
 
-# ================= DEBUG PANEL =================
+# ================= DEBUG =================
 
-@dp.message(F.text == "/debug")
-async def debug_cmd(m: Message):
-    if m.from_user.id not in OWNERS:
-        return
-
-    info = await bot.get_webhook_info()
-    uptime = int(time.time() - START_TIME)
-
-    await m.answer(
-        "🧠 DEBUG\n\n"
-        f"Webhook: {info.url}\n"
-        f"Pending: {info.pending_update_count}\n"
-        f"Uptime: {uptime}s\n"
-    )
-
-# ================= CALLBACK DEBUG =================
-
-@dp.callback_query(F.data == "debug_btn")
-async def debug_btn(c: CallbackQuery):
+@dp.callback_query(F.data == "debug")
+async def debug(c: CallbackQuery):
     info = await bot.get_webhook_info()
     uptime = int(time.time() - START_TIME)
 
     await c.message.answer(
-        f"🧠 DEBUG\nWebhook: {info.url}\nPending: {info.pending_update_count}\nUptime: {uptime}s"
+        f"🧠 DEBUG\n"
+        f"Webhook: {info.url}\n"
+        f"Pending: {info.pending_update_count}\n"
+        f"Uptime: {uptime}s"
     )
 
-# ================= WEBHOOK WATCHER =================
-
-async def webhook_watcher():
-    while True:
-        try:
-            info = await bot.get_webhook_info()
-
-            if info.url != WEBHOOK_URL:
-                await bot.set_webhook(WEBHOOK_URL)
-                log("webhook fixed")
-
-        except Exception as e:
-            log(f"webhook error: {e}")
-
-        await asyncio.sleep(30)
-
-# ================= WEB SERVER =================
+# ================= WEBHOOK =================
 
 async def handle(request):
-    data = await request.json()
-    update = types.Update.model_validate(data)
-    await dp.feed_update(bot, update)
+    try:
+        data = await request.json()
+        update = types.Update.model_validate(data)
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        print("WEBHOOK ERROR:", e)
+
     return web.Response(text="ok")
 
 async def index(request):
-    return web.Response(text="BOT OK (DEBUG MODE)")
+    return web.Response(text="BOT OK")
 
 # ================= STARTUP =================
 
 async def on_startup(app):
-    log("START")
+    print("BOT STARTED")
 
     await bot.set_webhook(WEBHOOK_URL)
 
-    asyncio.create_task(webhook_watcher())
-
-    log("READY")
+    print("WEBHOOK SET:", WEBHOOK_URL)
 
 # ================= APP =================
 
