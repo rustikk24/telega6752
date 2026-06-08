@@ -18,7 +18,10 @@ from aiogram.fsm.context import FSMContext
 
 TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
-OWNERS = set(int(x) for x in os.getenv("OWNERS", "").split(",") if x.strip().isdigit())
+
+OWNER_IDS = set(int(x) for x in os.getenv("OWNERS", "").split(",") if x.strip().isdigit())
+FALLBACK_ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "1234")
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN missing")
@@ -32,9 +35,21 @@ bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
 
-# ================= CACHE =================
+# ================= ADMIN =================
 
-sub_cache = {}
+def is_admin(user_id: int):
+    return user_id in OWNER_IDS or user_id == FALLBACK_ADMIN_ID
+
+
+def admin_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎮 Турниры", callback_data="adm_tournaments")],
+        [InlineKeyboardButton(text="👥 Игроки", callback_data="adm_players")],
+        [InlineKeyboardButton(text="➕ Создать", callback_data="adm_create")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data="adm_delete")],
+        [InlineKeyboardButton(text="🏠 Рума", callback_data="adm_room")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="adm_close")]
+    ])
 
 
 # ================= DB =================
@@ -61,204 +76,193 @@ CREATE TABLE IF NOT EXISTS players (
     tour INTEGER,
     user_id INTEGER,
     paid INTEGER DEFAULT 0,
-    receipt TEXT DEFAULT NULL
+    receipt TEXT
 )
 """)
 
 conn.commit()
 
 
-# ================= SAFE DB (FIXED LIGHT) =================
-
-def db(query, args=(), fetch=False):
-    cur.execute(query, args)
-    conn.commit()
-
-    if fetch:
-        return cur.fetchone()
-
-
 # ================= FSM =================
 
-class JoinFSM(StatesGroup):
-    tour = State()
-
-class PayFSM(StatesGroup):
-    receipt = State()
-
-class CreateFSM(StatesGroup):
+class AdminCreateFSM(StatesGroup):
     data = State()
 
-class RoomFSM(StatesGroup):
+class AdminRoomFSM(StatesGroup):
     data = State()
-
-
-# ================= SUB CHECK =================
-
-async def is_subscribed(user_id: int) -> bool:
-    if user_id in sub_cache:
-        return sub_cache[user_id]
-
-    try:
-        member = await bot.get_chat_member(CHANNEL, user_id)
-        ok = member.status in ("member", "administrator", "creator")
-        sub_cache[user_id] = ok
-        return ok
-    except:
-        return False
-
-
-# ================= MENU =================
-
-def menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎮 Турниры", callback_data="list")],
-        [InlineKeyboardButton(text="🎟 Участвовать", callback_data="join")],
-        [InlineKeyboardButton(text="⚙ Админ", callback_data="admin")]
-    ])
 
 
 # ================= START =================
 
 @dp.message(F.text == "/start")
 async def start(m: Message):
-    db("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
+    cur.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
+    conn.commit()
 
-    if not await is_subscribed(m.from_user.id):
-        return await m.answer("❌ Подпишись на канал")
-
-    await m.answer("🎮 MENU", reply_markup=menu())
+    await m.answer("🎮 MENU\n\nНапиши /admin для панели")
 
 
-# ================= LIST TOURNAMENTS =================
+# ================= ADMIN ENTRY =================
 
-@dp.callback_query(F.data == "list")
-async def list_tournaments(c: CallbackQuery):
+@dp.message(F.text == "/admin")
+async def admin(m: Message):
 
-    rows = db("SELECT number, price, max_players, room_sent FROM tournaments", fetch=True)
+    if not is_admin(m.from_user.id):
+        return await m.answer("⛔ нет доступа")
 
-    if not rows:
-        return await c.message.answer("❌ Турниров нет")
-
-    text = "🎮 Турниры:\n\n"
-
-    for n, p, cap, room in cur.fetchall():
-        status = "🏁 есть рума" if room else "🔴 нет рума"
-        text += f"#{n} | {p}₽ | {cap} мест | {status}\n"
-
-    await c.message.answer(text)
+    await m.answer("⚙ ADMIN PANEL", reply_markup=admin_kb())
 
 
-# ================= JOIN =================
+# ================= ADMIN PANEL CALLBACK =================
 
-@dp.callback_query(F.data == "join")
-async def join(c: CallbackQuery, state: FSMContext):
-    await state.set_state(JoinFSM.tour)
-    await c.message.answer("Введите номер турнира")
+@dp.callback_query(F.data.startswith("adm"))
+async def admin_panel(c: CallbackQuery, state: FSMContext):
 
+    if not is_admin(c.from_user.id):
+        return await c.answer("⛔ нет доступа", show_alert=True)
 
-@dp.message(JoinFSM.tour)
-async def join_save(m: Message, state: FSMContext):
+    data = c.data
 
-    if not m.text.isdigit():
-        return
+    # ---------- TOURNAMENTS ----------
+    if data == "adm_tournaments":
+        rows = cur.execute("SELECT number, price, max_players, room_sent FROM tournaments").fetchall()
 
-    num = int(m.text)
+        text = "🎮 ТУРНИРЫ:\n\n"
+        for n, p, cap, room in rows:
+            text += f"#{n} | {p}₽ | {cap} мест | {'🏁' if room else '🔴'}\n"
 
-    tour = db(
-        "SELECT price, max_players, card FROM tournaments WHERE number=?",
-        (num,),
-        fetch=True
-    )
-
-    if not tour:
-        return await m.answer("❌ нет турнира")
-
-    price, cap, card = tour
-
-    exists = db(
-        "SELECT 1 FROM players WHERE tour=? AND user_id=?",
-        (num, m.from_user.id),
-        fetch=True
-    )
-
-    if exists:
-        return await m.answer("❌ уже участвуешь")
-
-    count = db(
-        "SELECT COUNT(*) FROM players WHERE tour=?",
-        (num,),
-        fetch=True
-    )[0]
-
-    if count >= cap:
-        return await m.answer("❌ нет мест")
-
-    db("INSERT INTO players VALUES (?,?,0,NULL)", (num, m.from_user.id))
-
-    await state.set_state(PayFSM.receipt)
-    await state.update_data(tour=num)
-
-    await m.answer(f"💰 {price}₽\n💳 {card}\n📸 отправь чек")
+        return await c.message.answer(text)
 
 
-# ================= RECEIPT =================
+    # ---------- PLAYERS ----------
+    if data == "adm_players":
+        rows = cur.execute("SELECT tour, user_id, paid FROM players").fetchall()
 
-@dp.message(PayFSM.receipt)
-async def receipt(m: Message, state: FSMContext):
+        text = "👥 ИГРОКИ:\n\n"
+        for t, u, p in rows:
+            text += f"#{t} | {u} | {'✅' if p else '❌'}\n"
 
-    data = await state.get_data()
-    tour = data["tour"]
+        return await c.message.answer(text)
 
-    file_id = None
 
-    if m.photo:
-        file_id = m.photo[-1].file_id
-    elif m.document:
-        file_id = m.document.file_id
-    else:
-        return await m.answer("❌ отправь фото")
+    # ---------- CREATE ----------
+    if data == "adm_create":
+        await state.set_state(AdminCreateFSM.data)
+        return await c.message.answer(
+            "Создание турнира:\n"
+            "номер цена лимит карта время(HH:MM)"
+        )
 
-    db("""
-        UPDATE players
-        SET receipt=?, paid=0
-        WHERE tour=? AND user_id=?
-    """, (file_id, tour, m.from_user.id))
 
-    for owner in OWNERS:
-        await bot.send_message(owner, f"💰 Чек #{tour}\n/approve {tour} {m.from_user.id}")
-        if m.photo:
-            await bot.send_photo(owner, file_id)
-        else:
-            await bot.send_document(owner, file_id)
+    # ---------- DELETE ----------
+    if data == "adm_delete":
+        rows = cur.execute("SELECT number FROM tournaments").fetchall()
 
-    await m.answer("⏳ проверка")
+        kb = [[InlineKeyboardButton(text=f"❌ #{n}", callback_data=f"del:{n[0]}")] for n in rows]
+
+        return await c.message.answer(
+            "Удалить турнир:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+        )
+
+
+    # ---------- ROOM ----------
+    if data == "adm_room":
+        await state.set_state(AdminRoomFSM.data)
+        return await c.message.answer("Введите:\nномер ссылка_румы")
+
+
+    # ---------- CLOSE ----------
+    if data == "adm_close":
+        return await c.message.delete()
+
+
+# ================= CREATE =================
+
+@dp.message(AdminCreateFSM.data)
+async def create_tournament(m: Message, state: FSMContext):
+
+    try:
+        parts = m.text.split()
+
+        n = int(parts[0])
+        p = int(parts[1])
+        cap = int(parts[2])
+        time_str = parts[-1]
+        card = " ".join(parts[3:-1])
+
+        h, mm = map(int, time_str.split(":"))
+        now = datetime.now()
+        start = now.replace(hour=h, minute=mm, second=0, microsecond=0)
+
+        if start < now:
+            start += timedelta(days=1)
+
+        cur.execute("""
+            INSERT OR REPLACE INTO tournaments
+            VALUES (?,?,?,?,?,?,0)
+        """, (n, p, cap, card, "", int(start.timestamp())))
+
+        conn.commit()
+
+        await m.answer("✅ создано")
+
+    except:
+        await m.answer("❌ ошибка")
+
     await state.clear()
 
 
-# ================= APPROVE =================
+# ================= ROOM =================
 
-@dp.message(F.text.startswith("/approve"))
-async def approve(m: Message):
-    if m.from_user.id not in OWNERS:
-        return
+@dp.message(AdminRoomFSM.data)
+async def set_room(m: Message, state: FSMContext):
 
     try:
-        _, tour, user_id = m.text.split()
-        tour = int(tour)
-        user_id = int(user_id)
+        num, link = m.text.split(maxsplit=1)
 
-        db("""
-            UPDATE players
-            SET paid=1
-            WHERE tour=? AND user_id=?
-        """, (tour, user_id))
+        cur.execute(
+            "UPDATE tournaments SET room=?, room_sent=1 WHERE number=?",
+            (link, int(num))
+        )
 
-        await bot.send_message(user_id, f"✅ Оплата подтверждена #{tour}")
-        await m.answer("✅ done")
+        conn.commit()
+
+        players = cur.execute(
+            "SELECT user_id FROM players WHERE tour=?",
+            (int(num),)
+        ).fetchall()
+
+        for p in players:
+            try:
+                await bot.send_message(p[0], f"🏠 Рума #{num}\n{link}")
+            except:
+                pass
+
+        await m.answer("✅ румa отправлена")
 
     except:
-        await m.answer("❌ /approve tour user_id")
+        await m.answer("❌ ошибка")
+
+    await state.clear()
+
+
+# ================= DELETE =================
+
+@dp.callback_query(F.data.startswith("del:"))
+async def delete(c: CallbackQuery):
+
+    if not is_admin(c.from_user.id):
+        return
+
+    num = int(c.data.split(":")[1])
+
+    cur.execute("DELETE FROM tournaments WHERE number=?", (num,))
+    cur.execute("DELETE FROM players WHERE tour=?", (num,))
+    conn.commit()
+
+    await c.answer("удалено")
+    await c.message.edit_text("🗑 удалено")
 
 
 # ================= WEBHOOK =================
