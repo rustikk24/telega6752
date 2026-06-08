@@ -1,5 +1,4 @@
 import asyncio
-import time
 import sqlite3
 import os
 from datetime import datetime, timedelta
@@ -31,6 +30,11 @@ WEBHOOK_URL = BASE_URL + "/webhook"
 
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
+
+
+# ================= CACHE =================
+
+sub_cache = {}
 
 
 # ================= DB =================
@@ -80,21 +84,28 @@ class RoomFSM(StatesGroup):
     data = State()
 
 
-# ================= SUB CHECK =================
+# ================= FAST DB WRAPPER =================
+
+async def db_execute(query, args=()):
+    return await asyncio.to_thread(cur.execute, query, args)
+
+async def db_commit():
+    return await asyncio.to_thread(conn.commit)
+
+
+# ================= SUB CHECK (FAST CACHE) =================
 
 async def is_subscribed(user_id: int) -> bool:
+    if user_id in sub_cache:
+        return sub_cache[user_id]
+
     try:
         member = await bot.get_chat_member(CHANNEL, user_id)
-        return member.status in ("member", "administrator", "creator")
+        ok = member.status in ("member", "administrator", "creator")
+        sub_cache[user_id] = ok
+        return ok
     except:
         return False
-
-
-def sub_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться", url="https://t.me/ovqk_fun")],
-        [InlineKeyboardButton(text="🔄 Проверить", callback_data="check_sub")]
-    ])
 
 
 # ================= MENU =================
@@ -107,15 +118,15 @@ def menu():
     ])
 
 
-# ================= START =================
+# ================= START (FAST) =================
 
 @dp.message(F.text == "/start")
 async def start(m: Message):
-    cur.execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
-    conn.commit()
+    asyncio.create_task(db_execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,)))
+    asyncio.create_task(db_commit())
 
     if not await is_subscribed(m.from_user.id):
-        return await m.answer("❌ Подпишись на канал", reply_markup=sub_keyboard())
+        return await m.answer("❌ Подпишись на канал")
 
     await m.answer("🎮 MENU", reply_markup=menu())
 
@@ -135,34 +146,40 @@ async def join_save(m: Message, state: FSMContext):
 
     num = int(m.text)
 
-    tour = cur.execute(
+    await db_execute(
         "SELECT price, max_players, card FROM tournaments WHERE number=?",
         (num,)
-    ).fetchone()
+    )
+    tour = cur.fetchone()
 
     if not tour:
         return await m.answer("❌ нет турнира")
 
     price, cap, card = tour
 
-    exists = cur.execute(
+    await db_execute(
         "SELECT 1 FROM players WHERE tour=? AND user_id=?",
         (num, m.from_user.id)
-    ).fetchone()
+    )
+    exists = cur.fetchone()
 
     if exists:
         return await m.answer("❌ уже участвуешь")
 
-    count = cur.execute(
+    await db_execute(
         "SELECT COUNT(*) FROM players WHERE tour=?",
         (num,)
-    ).fetchone()[0]
+    )
+    count = cur.fetchone()[0]
 
     if count >= cap:
         return await m.answer("❌ нет мест")
 
-    cur.execute("INSERT INTO players VALUES (?,?,0,NULL)", (num, m.from_user.id))
-    conn.commit()
+    await db_execute(
+        "INSERT INTO players VALUES (?,?,0,NULL)",
+        (num, m.from_user.id)
+    )
+    await db_commit()
 
     await state.set_state(PayFSM.receipt)
     await state.update_data(tour=num)
@@ -184,15 +201,13 @@ async def receipt(m: Message, state: FSMContext):
     elif m.document:
         file_id = m.document.file_id
     else:
-        return await m.answer("❌ отправь фото или файл")
+        return await m.answer("❌ отправь файл/фото")
 
-    cur.execute("""
-        UPDATE players
-        SET receipt=?, paid=0
+    await db_execute("""
+        UPDATE players SET receipt=?, paid=0
         WHERE tour=? AND user_id=?
     """, (file_id, tour, m.from_user.id))
-
-    conn.commit()
+    await db_commit()
 
     for owner in OWNERS:
         await bot.send_message(owner, f"💰 Чек #{tour}\n/approve {tour} {m.from_user.id}")
@@ -217,16 +232,14 @@ async def approve(m: Message):
         tour = int(tour)
         user_id = int(user_id)
 
-        cur.execute("""
-            UPDATE players
-            SET paid=1
+        await db_execute("""
+            UPDATE players SET paid=1
             WHERE tour=? AND user_id=?
         """, (tour, user_id))
-
-        conn.commit()
+        await db_commit()
 
         await bot.send_message(user_id, f"✅ Оплата подтверждена #{tour}")
-        await m.answer("✅ ok")
+        await m.answer("✅ done")
 
     except:
         await m.answer("❌ /approve tour user_id")
@@ -243,7 +256,7 @@ async def handle(request):
 
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
-    print("BOT STARTED")
+    print("FAST BOT STARTED")
 
 
 app = web.Application()
