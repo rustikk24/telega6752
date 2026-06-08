@@ -255,7 +255,88 @@ async def join_save(m: Message, state: FSMContext):
     await state.clear()
 
     await m.answer(f"💰 {price}₽\n💳 {card}\n📸 отправьте чек")
+# ================= WEBHOOK =================
 
+async def handle(request):
+
+И вставь прямо перед ним вот этот блок:
+
+# ================= USER TOURNAMENTS =================
+
+@dp.callback_query(F.data == "list")
+async def list_tournaments(c: CallbackQuery):
+
+    rows = cur.execute("""
+        SELECT number, price, max_players, room_sent
+        FROM tournaments
+    """).fetchall()
+
+    if not rows:
+        return await c.message.answer("❌ Турниров нет")
+
+    text = "🎮 Турниры:\n\n"
+
+    for n, p, cap, room in rows:
+        status = "🏁 Рума добавлена" if room else "🔴 Без румы"
+        text += f"#{n} | {p}₽ | {cap} мест | {status}\n"
+
+    await c.message.answer(text)
+
+
+# ================= ROOM =================
+
+@dp.callback_query(F.data == "room")
+async def room(c: CallbackQuery, state: FSMContext):
+
+    if c.from_user.id not in OWNERS:
+        return await c.answer("⛔ нет доступа", show_alert=True)
+
+    await state.set_state(RoomFSM.data)
+
+    await c.message.answer(
+        "Введите:\n\n"
+        "номер_турнира ссылка_на_руму"
+    )
+
+
+@dp.message(RoomFSM.data)
+async def room_save(m: Message, state: FSMContext):
+
+    try:
+        num, room_link = m.text.split(maxsplit=1)
+        num = int(num)
+
+        cur.execute(
+            "UPDATE tournaments SET room=?, room_sent=1 WHERE number=?",
+            (room_link, num)
+        )
+
+        conn.commit()
+
+        players = cur.execute(
+            "SELECT user_id FROM players WHERE tour=?",
+            (num,)
+        ).fetchall()
+
+        sent = 0
+
+        for player in players:
+            try:
+                await bot.send_message(
+                    player[0],
+                    f"🏠 Рума турнира №{num}\n\n{room_link}"
+                )
+                sent += 1
+            except:
+                pass
+
+        await m.answer(f"✅ Рума сохранена\n📨 Отправлено: {sent}")
+
+    except Exception as e:
+        await m.answer(f"❌ Ошибка: {e}")
+
+    await state.clear()
+    
 # ================= WEBHOOK =================
 
 async def handle(request):
