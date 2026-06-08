@@ -42,7 +42,7 @@ sub_cache = {}
 conn = sqlite3.connect("db.sqlite3", check_same_thread=False)
 cur = conn.cursor()
 
-cur.execute("""CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)""")
+cur.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS tournaments (
@@ -68,13 +68,22 @@ CREATE TABLE IF NOT EXISTS players (
 conn.commit()
 
 
+# ================= SAFE DB (FIXED LIGHT) =================
+
+def db(query, args=(), fetch=False):
+    cur.execute(query, args)
+    conn.commit()
+
+    if fetch:
+        return cur.fetchone()
+
+
 # ================= FSM =================
 
 class JoinFSM(StatesGroup):
     tour = State()
 
 class PayFSM(StatesGroup):
-    tour = State()
     receipt = State()
 
 class CreateFSM(StatesGroup):
@@ -84,16 +93,7 @@ class RoomFSM(StatesGroup):
     data = State()
 
 
-# ================= FAST DB WRAPPER =================
-
-async def db_execute(query, args=()):
-    return await asyncio.to_thread(cur.execute, query, args)
-
-async def db_commit():
-    return await asyncio.to_thread(conn.commit)
-
-
-# ================= SUB CHECK (FAST CACHE) =================
+# ================= SUB CHECK =================
 
 async def is_subscribed(user_id: int) -> bool:
     if user_id in sub_cache:
@@ -118,17 +118,35 @@ def menu():
     ])
 
 
-# ================= START (FAST) =================
+# ================= START =================
 
 @dp.message(F.text == "/start")
 async def start(m: Message):
-    asyncio.create_task(db_execute("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,)))
-    asyncio.create_task(db_commit())
+    db("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
 
     if not await is_subscribed(m.from_user.id):
         return await m.answer("❌ Подпишись на канал")
 
     await m.answer("🎮 MENU", reply_markup=menu())
+
+
+# ================= LIST TOURNAMENTS =================
+
+@dp.callback_query(F.data == "list")
+async def list_tournaments(c: CallbackQuery):
+
+    rows = db("SELECT number, price, max_players, room_sent FROM tournaments", fetch=True)
+
+    if not rows:
+        return await c.message.answer("❌ Турниров нет")
+
+    text = "🎮 Турниры:\n\n"
+
+    for n, p, cap, room in cur.fetchall():
+        status = "🏁 есть рума" if room else "🔴 нет рума"
+        text += f"#{n} | {p}₽ | {cap} мест | {status}\n"
+
+    await c.message.answer(text)
 
 
 # ================= JOIN =================
@@ -141,45 +159,42 @@ async def join(c: CallbackQuery, state: FSMContext):
 
 @dp.message(JoinFSM.tour)
 async def join_save(m: Message, state: FSMContext):
+
     if not m.text.isdigit():
         return
 
     num = int(m.text)
 
-    await db_execute(
+    tour = db(
         "SELECT price, max_players, card FROM tournaments WHERE number=?",
-        (num,)
+        (num,),
+        fetch=True
     )
-    tour = cur.fetchone()
 
     if not tour:
         return await m.answer("❌ нет турнира")
 
     price, cap, card = tour
 
-    await db_execute(
+    exists = db(
         "SELECT 1 FROM players WHERE tour=? AND user_id=?",
-        (num, m.from_user.id)
+        (num, m.from_user.id),
+        fetch=True
     )
-    exists = cur.fetchone()
 
     if exists:
         return await m.answer("❌ уже участвуешь")
 
-    await db_execute(
+    count = db(
         "SELECT COUNT(*) FROM players WHERE tour=?",
-        (num,)
-    )
-    count = cur.fetchone()[0]
+        (num,),
+        fetch=True
+    )[0]
 
     if count >= cap:
         return await m.answer("❌ нет мест")
 
-    await db_execute(
-        "INSERT INTO players VALUES (?,?,0,NULL)",
-        (num, m.from_user.id)
-    )
-    await db_commit()
+    db("INSERT INTO players VALUES (?,?,0,NULL)", (num, m.from_user.id))
 
     await state.set_state(PayFSM.receipt)
     await state.update_data(tour=num)
@@ -191,6 +206,7 @@ async def join_save(m: Message, state: FSMContext):
 
 @dp.message(PayFSM.receipt)
 async def receipt(m: Message, state: FSMContext):
+
     data = await state.get_data()
     tour = data["tour"]
 
@@ -201,13 +217,13 @@ async def receipt(m: Message, state: FSMContext):
     elif m.document:
         file_id = m.document.file_id
     else:
-        return await m.answer("❌ отправь файл/фото")
+        return await m.answer("❌ отправь фото")
 
-    await db_execute("""
-        UPDATE players SET receipt=?, paid=0
+    db("""
+        UPDATE players
+        SET receipt=?, paid=0
         WHERE tour=? AND user_id=?
     """, (file_id, tour, m.from_user.id))
-    await db_commit()
 
     for owner in OWNERS:
         await bot.send_message(owner, f"💰 Чек #{tour}\n/approve {tour} {m.from_user.id}")
@@ -216,7 +232,7 @@ async def receipt(m: Message, state: FSMContext):
         else:
             await bot.send_document(owner, file_id)
 
-    await m.answer("⏳ на проверке")
+    await m.answer("⏳ проверка")
     await state.clear()
 
 
@@ -232,11 +248,11 @@ async def approve(m: Message):
         tour = int(tour)
         user_id = int(user_id)
 
-        await db_execute("""
-            UPDATE players SET paid=1
+        db("""
+            UPDATE players
+            SET paid=1
             WHERE tour=? AND user_id=?
         """, (tour, user_id))
-        await db_commit()
 
         await bot.send_message(user_id, f"✅ Оплата подтверждена #{tour}")
         await m.answer("✅ done")
@@ -256,7 +272,7 @@ async def handle(request):
 
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
-    print("FAST BOT STARTED")
+    print("BOT STARTED")
 
 
 app = web.Application()
