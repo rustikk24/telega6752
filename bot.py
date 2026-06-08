@@ -1,269 +1,309 @@
+import os
 import asyncio
 import sqlite3
-import os
-from datetime import datetime, timedelta
 
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import Message, CallbackQuery
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 
-# ================= CONFIG =================
+# =====================
+# ENV
+# =====================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
 
-TOKEN = os.getenv("BOT_TOKEN")
-BASE_URL = os.getenv("BASE_URL")
-
-OWNER_IDS = set(int(x) for x in os.getenv("OWNERS", "").split(",") if x.strip().isdigit())
-FALLBACK_ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-
-bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher(storage=MemoryStorage())
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
 
-# ================= DB =================
-
-conn = sqlite3.connect("db.sqlite3", check_same_thread=False)
+# =====================
+# DB
+# =====================
+conn = sqlite3.connect("bot.db")
 cur = conn.cursor()
-
-cur.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS tournaments (
-    number INTEGER PRIMARY KEY,
-    price INTEGER,
-    max_players INTEGER,
-    card TEXT,
-    bank TEXT,
-    room TEXT,
-    start_time INTEGER,
-    room_sent INTEGER DEFAULT 0
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+number INTEGER,
+price INTEGER,
+max_players INTEGER,
+start_time TEXT,
+room TEXT DEFAULT '',
+status TEXT DEFAULT 'REG'
 )
 """)
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS players (
-    tour INTEGER,
-    user_id INTEGER,
-    paid INTEGER DEFAULT 0,
-    receipt TEXT
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+user_id INTEGER,
+tournament INTEGER,
+paid INTEGER DEFAULT 0,
+receipt TEXT
 )
 """)
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS bans (
-    user_id INTEGER PRIMARY KEY
+user_id INTEGER PRIMARY KEY
 )
 """)
 
 conn.commit()
 
 
-# ================= SAFE DB =================
+# =====================
+# ADMIN CHECK
+# =====================
+def is_admin(uid):
+    return uid in ADMIN_IDS
 
-def db_fetch(q, a=()):
-    cur.execute(q, a)
-    return cur.fetchone()
 
-def db_fetchall(q, a=()):
-    cur.execute(q, a)
-    return cur.fetchall()
+def is_banned(uid):
+    cur.execute("SELECT 1 FROM bans WHERE user_id=?", (uid,))
+    return cur.fetchone() is not None
 
-def db_exec(q, a=()):
-    cur.execute(q, a)
+
+# =====================
+# KEYBOARDS
+# =====================
+def main_kb(uid):
+    kb = [
+        [KeyboardButton(text="🎮 Турниры")],
+        [KeyboardButton(text="👤 Моя статистика")]
+    ]
+    if is_admin(uid):
+        kb.append([KeyboardButton(text="⚙ Админ панель")])
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
+def admin_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🏆 Турниры")],
+            [KeyboardButton(text="➕ Создать турнир")],
+            [KeyboardButton(text="🔗 Рума")],
+            [KeyboardButton(text="🚫 Бан")],
+            [KeyboardButton(text="🗑 Удалить турнир")],
+            [KeyboardButton(text="🏠 Назад")]
+        ],
+        resize_keyboard=True
+    )
+
+
+# =====================
+# STATE
+# =====================
+user_state = {}
+
+
+# =====================
+# START
+# =====================
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    if is_banned(message.from_user.id):
+        return await message.answer("🚫 Вы заблокированы")
+
+    await message.answer("🏠 Главное меню", reply_markup=main_kb(message.from_user.id))
+
+
+# =====================
+# USER MENU
+# =====================
+@dp.message(F.text == "🎮 Турниры")
+async def tours(message: types.Message):
+    cur.execute("SELECT number, price, max_players, status FROM tournaments")
+    data = cur.fetchall()
+
+    text = "🏆 Турниры:\n\n"
+    for t in data:
+        number, price, maxp, status = t
+        cur.execute("SELECT COUNT(*) FROM players WHERE tournament=?", (number,))
+        count = cur.fetchone()[0]
+        text += f"#{number} | {price}₽ | {count}/{maxp} | {status}\n"
+
+    await message.answer(text)
+
+
+@dp.message(F.text == "👤 Моя статистика")
+async def stats(message: types.Message):
+    cur.execute("SELECT tournament FROM players WHERE user_id=?", (message.from_user.id,))
+    data = cur.fetchall()
+
+    text = "👤 Твои турниры:\n\n"
+    for d in data:
+        text += f"🏆 #{d[0]}\n"
+
+    await message.answer(text or "Нет данных")
+
+
+# =====================
+# ADMIN PANEL
+# =====================
+@dp.message(F.text == "⚙ Админ панель")
+async def admin(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer("⚙ Админ панель", reply_markup=admin_kb())
+
+
+@dp.message(F.text == "🏠 Назад")
+async def back(message: types.Message):
+    await message.answer("🏠 Главное меню", reply_markup=main_kb(message.from_user.id))
+
+
+# =====================
+# CREATE TOURNAMENT
+# =====================
+@dp.message(F.text == "➕ Создать турнир")
+async def create(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    user_state[message.from_user.id] = "create"
+    await message.answer("Введите: номер цена макс_игроков время")
+
+
+# =====================
+# ROOM
+# =====================
+@dp.message(F.text == "🔗 Рума")
+async def room(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    user_state[message.from_user.id] = "room"
+    await message.answer("Введите: номер и ссылку")
+
+
+# =====================
+# BAN
+# =====================
+@dp.message(F.text == "🚫 Бан")
+async def ban(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    user_state[message.from_user.id] = "ban"
+    await message.answer("Введите user_id")
+
+
+# =====================
+# DELETE TOURNAMENT
+# =====================
+@dp.message(F.text == "🗑 Удалить турнир")
+async def delete(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    user_state[message.from_user.id] = "delete"
+    await message.answer("Введите номер турнира")
+
+
+# =====================
+# JOIN + PHOTO CHECK + ADMIN APPROVE FLOW
+# =====================
+@dp.message(F.photo)
+async def photo(message: types.Message):
+    if is_banned(message.from_user.id):
+        return
+
+    cur.execute("SELECT MAX(number) FROM tournaments")
+    tour = cur.fetchone()[0]
+
+    if not tour:
+        return
+
+    # save receipt
+    cur.execute(
+        "INSERT INTO players (user_id, tournament, receipt) VALUES (?,?,?)",
+        (message.from_user.id, tour, message.photo[-1].file_id)
+    )
     conn.commit()
 
-
-# ================= ADMIN =================
-
-def is_admin(uid: int):
-    return uid in OWNER_IDS or uid == FALLBACK_ADMIN_ID
-
-
-# ================= SAFE SEND (FIX CRASH) =================
-
-async def safe_send(msg: Message, text: str, **kwargs):
-    try:
-        return await msg.answer(text, **kwargs)
-    except TelegramForbiddenError:
-        print(f"[BLOCKED USER] {msg.from_user.id}")
-        return
-    except Exception as e:
-        print("SEND ERROR:", e)
+    for admin in ADMIN_IDS:
+        await bot.send_photo(
+            admin,
+            message.photo[-1].file_id,
+            caption=f"🧾 Заявка\nUser: {message.from_user.id}\nTour: {tour}"
+        )
 
 
-# ================= BAN =================
+# =====================
+# ADMIN ACTIONS
+# =====================
+@dp.message()
+async def router(message: types.Message):
+    uid = message.from_user.id
+    text = message.text
 
-def is_banned(uid: int):
-    r = db_fetch("SELECT 1 FROM bans WHERE user_id=?", (uid,))
-    return r is not None
-
-
-# ================= MENU =================
-
-def menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎮 Турниры", callback_data="list")],
-        [InlineKeyboardButton(text="👤 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="⚙ Админ", callback_data="admin")]
-    ])
-
-
-# ================= START =================
-
-@dp.message(F.text == "/start")
-async def start(m: Message):
-
-    if is_banned(m.from_user.id):
+    if is_banned(uid):
         return
 
-    db_exec("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
+    if uid in user_state:
 
-    await safe_send(m, "🎮 MENU", reply_markup=menu())
+        state = user_state[uid]
 
+        # CREATE
+        if state == "create":
+            number, price, maxp, time = text.split()
+            cur.execute(
+                "INSERT INTO tournaments (number, price, max_players, start_time) VALUES (?,?,?,?)",
+                (int(number), int(price), int(maxp), time)
+            )
+            conn.commit()
+            user_state.pop(uid)
+            return await message.answer("✅ Турнир создан")
 
-# ================= LIST =================
+        # ROOM
+        if state == "room":
+            number, link = text.split(maxsplit=1)
+            cur.execute("UPDATE tournaments SET room=?, status='READY' WHERE number=?",
+                        (link, int(number)))
+            conn.commit()
+            user_state.pop(uid)
+            return await message.answer("🔗 Рума добавлена")
 
-@dp.callback_query(F.data == "list")
-async def list_tournaments(c: CallbackQuery):
+        # BAN
+        if state == "ban":
+            cur.execute("INSERT OR IGNORE INTO bans VALUES (?)", (int(text),))
+            conn.commit()
+            user_state.pop(uid)
+            return await message.answer("🚫 Забанен")
 
-    rows = db_fetchall(
-        "SELECT number, price, max_players, room_sent FROM tournaments"
-    )
-
-    if not rows:
-        return await c.message.answer("❌ турниров нет")
-
-    text = "🎮 Турниры:\n\n"
-
-    for n, p, cap, room in rows:
-        status = "🏁 есть рума" if room else "🔴 нет рума"
-        text += f"#{n} | {p}₽ | {cap} мест | {status}\n"
-
-    await c.message.answer(text)
-
-
-# ================= STATS =================
-
-@dp.callback_query(F.data == "stats")
-async def stats(c: CallbackQuery):
-
-    rows = db_fetchall(
-        "SELECT tour FROM players WHERE user_id=?",
-        (c.from_user.id,)
-    )
-
-    if not rows:
-        return await c.message.answer("📊 нет данных")
-
-    text = "📊 СТАТИСТИКА:\n\n"
-
-    for r in rows:
-        text += f"🎮 Турнир #{r[0]}\n"
-
-    await c.message.answer(text)
+        # DELETE
+        if state == "delete":
+            cur.execute("DELETE FROM tournaments WHERE number=?", (int(text),))
+            cur.execute("DELETE FROM players WHERE tournament=?", (int(text),))
+            conn.commit()
+            user_state.pop(uid)
+            return await message.answer("🗑 Удалён")
 
 
-# ================= ADMIN =================
-
-@dp.callback_query(F.data == "admin")
-async def admin(c: CallbackQuery):
-
-    if not is_admin(c.from_user.id):
-        return await c.answer("⛔ нет доступа", show_alert=True)
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("🎮 турниры", callback_data="adm_tour")],
-        [InlineKeyboardButton("👥 игроки", callback_data="adm_players")],
-        [InlineKeyboardButton("🔨 бан", callback_data="adm_ban")]
-    ])
-
-    await c.message.answer("⚙ ADMIN PANEL", reply_markup=kb)
-
-
-# ================= ADMIN TOURS =================
-
-@dp.callback_query(F.data == "adm_tour")
-async def adm_tour(c: CallbackQuery):
-
-    rows = db_fetchall("SELECT number, price, bank FROM tournaments")
-
-    text = "🎮 ТУРНИРЫ:\n\n"
-
-    for n, p, b in rows:
-        text += f"#{n} | {p}₽ | 💳 {b}\n"
-
-    await c.message.answer(text)
-
-
-# ================= ADMIN PLAYERS =================
-
-@dp.callback_query(F.data == "adm_players")
-async def adm_players(c: CallbackQuery):
-
-    rows = db_fetchall("SELECT user_id, tour FROM players")
-
-    text = "👥 ИГРОКИ:\n\n"
-
-    for u, t in rows:
-        text += f"👤 {u} → #{t}\n"
-
-    await c.message.answer(text)
-
-
-# ================= BAN SYSTEM =================
-
-@dp.callback_query(F.data == "adm_ban")
-async def ban_menu(c: CallbackQuery):
-
-    if not is_admin(c.from_user.id):
-        return
-
-    await c.message.answer("✍ отправь user_id для бана")
-
-
-@dp.message(F.text)
-async def ban_user(m: Message):
-
-    if not is_admin(m.from_user.id):
-        return
-
-    if m.text.isdigit():
-        uid = int(m.text)
-
-        db_exec("INSERT OR IGNORE INTO bans VALUES (?)", (uid,))
-
-        await safe_send(m, f"⛔ забанен {uid}")
-
-
-# ================= WEBHOOK (ANTI CRASH) =================
-
-async def handle(request):
-    try:
-        data = await request.json()
-        update = types.Update.model_validate(data)
-        await dp.feed_update(bot, update)
-    except Exception as e:
-        print("WEBHOOK ERROR:", e)
-
-    return web.Response(text="ok")
-
-
+# =====================
+# WEBHOOK
+# =====================
 async def on_startup(app):
-    await bot.set_webhook(BASE_URL + "/webhook")
-    print("BOT STARTED")
+    await bot.set_webhook(WEBHOOK_URL)
 
 
-app = web.Application()
-app.router.add_post("/webhook", handle)
-app.on_startup.append(on_startup)
+async def on_shutdown(app):
+    await bot.delete_webhook()
+
+
+def create_app():
+    app = web.Application()
+
+    SimpleRequestHandler(dp, bot).register(app, path="/webhook")
+    setup_application(app, dp, bot=bot)
+
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+
+    return app
 
 
 if __name__ == "__main__":
-    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    web.run_app(create_app(), host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
