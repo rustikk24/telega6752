@@ -12,6 +12,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramForbiddenError
 
 
 # ================= CONFIG =================
@@ -21,8 +22,6 @@ BASE_URL = os.getenv("BASE_URL")
 
 OWNER_IDS = set(int(x) for x in os.getenv("OWNERS", "").split(",") if x.strip().isdigit())
 FALLBACK_ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-
-CHANNELS = ["@ovqk_fun", "https://t.me/+6t90ccU26ydlZWVi"]
 
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
@@ -66,30 +65,44 @@ CREATE TABLE IF NOT EXISTS bans (
 conn.commit()
 
 
+# ================= SAFE DB =================
+
+def db_fetch(q, a=()):
+    cur.execute(q, a)
+    return cur.fetchone()
+
+def db_fetchall(q, a=()):
+    cur.execute(q, a)
+    return cur.fetchall()
+
+def db_exec(q, a=()):
+    cur.execute(q, a)
+    conn.commit()
+
+
 # ================= ADMIN =================
 
 def is_admin(uid: int):
     return uid in OWNER_IDS or uid == FALLBACK_ADMIN_ID
 
 
-# ================= SUB CHECK =================
+# ================= SAFE SEND (FIX CRASH) =================
 
-async def check_subs(user_id: int):
+async def safe_send(msg: Message, text: str, **kwargs):
     try:
-        for ch in CHANNELS:
-            member = await bot.get_chat_member(ch, user_id)
-            if member.status not in ("member", "administrator", "creator"):
-                return False
-        return True
-    except:
-        return False
+        return await msg.answer(text, **kwargs)
+    except TelegramForbiddenError:
+        print(f"[BLOCKED USER] {msg.from_user.id}")
+        return
+    except Exception as e:
+        print("SEND ERROR:", e)
 
 
-# ================= BAN CHECK =================
+# ================= BAN =================
 
 def is_banned(uid: int):
-    cur.execute("SELECT 1 FROM bans WHERE user_id=?", (uid,))
-    return cur.fetchone() is not None
+    r = db_fetch("SELECT 1 FROM bans WHERE user_id=?", (uid,))
+    return r is not None
 
 
 # ================= MENU =================
@@ -108,12 +121,32 @@ def menu():
 async def start(m: Message):
 
     if is_banned(m.from_user.id):
-        return await m.answer("⛔ ты забанен")
+        return
 
-    if not await check_subs(m.from_user.id):
-        return await m.answer("❌ подпишись на каналы и попробуй снова")
+    db_exec("INSERT OR IGNORE INTO users VALUES (?)", (m.from_user.id,))
 
-    await m.answer("🎮 MENU", reply_markup=menu())
+    await safe_send(m, "🎮 MENU", reply_markup=menu())
+
+
+# ================= LIST =================
+
+@dp.callback_query(F.data == "list")
+async def list_tournaments(c: CallbackQuery):
+
+    rows = db_fetchall(
+        "SELECT number, price, max_players, room_sent FROM tournaments"
+    )
+
+    if not rows:
+        return await c.message.answer("❌ турниров нет")
+
+    text = "🎮 Турниры:\n\n"
+
+    for n, p, cap, room in rows:
+        status = "🏁 есть рума" if room else "🔴 нет рума"
+        text += f"#{n} | {p}₽ | {cap} мест | {status}\n"
+
+    await c.message.answer(text)
 
 
 # ================= STATS =================
@@ -121,23 +154,23 @@ async def start(m: Message):
 @dp.callback_query(F.data == "stats")
 async def stats(c: CallbackQuery):
 
-    rows = cur.execute(
+    rows = db_fetchall(
         "SELECT tour FROM players WHERE user_id=?",
         (c.from_user.id,)
-    ).fetchall()
+    )
 
     if not rows:
-        return await c.message.answer("📊 ты не участвовал")
+        return await c.message.answer("📊 нет данных")
 
-    text = "📊 ТВОЯ СТАТИСТИКА:\n\n"
+    text = "📊 СТАТИСТИКА:\n\n"
 
-    for t in rows:
-        text += f"🎮 Турнир #{t[0]}\n"
+    for r in rows:
+        text += f"🎮 Турнир #{r[0]}\n"
 
     await c.message.answer(text)
 
 
-# ================= ADMIN PANEL =================
+# ================= ADMIN =================
 
 @dp.callback_query(F.data == "admin")
 async def admin(c: CallbackQuery):
@@ -154,12 +187,12 @@ async def admin(c: CallbackQuery):
     await c.message.answer("⚙ ADMIN PANEL", reply_markup=kb)
 
 
-# ================= ADMIN TOURNAMENTS =================
+# ================= ADMIN TOURS =================
 
 @dp.callback_query(F.data == "adm_tour")
 async def adm_tour(c: CallbackQuery):
 
-    rows = cur.execute("SELECT number, price, bank FROM tournaments").fetchall()
+    rows = db_fetchall("SELECT number, price, bank FROM tournaments")
 
     text = "🎮 ТУРНИРЫ:\n\n"
 
@@ -174,7 +207,7 @@ async def adm_tour(c: CallbackQuery):
 @dp.callback_query(F.data == "adm_players")
 async def adm_players(c: CallbackQuery):
 
-    rows = cur.execute("SELECT user_id, tour FROM players").fetchall()
+    rows = db_fetchall("SELECT user_id, tour FROM players")
 
     text = "👥 ИГРОКИ:\n\n"
 
@@ -184,10 +217,14 @@ async def adm_players(c: CallbackQuery):
     await c.message.answer(text)
 
 
-# ================= BAN =================
+# ================= BAN SYSTEM =================
 
 @dp.callback_query(F.data == "adm_ban")
 async def ban_menu(c: CallbackQuery):
+
+    if not is_admin(c.from_user.id):
+        return
+
     await c.message.answer("✍ отправь user_id для бана")
 
 
@@ -200,18 +237,21 @@ async def ban_user(m: Message):
     if m.text.isdigit():
         uid = int(m.text)
 
-        cur.execute("INSERT OR IGNORE INTO bans VALUES (?)", (uid,))
-        conn.commit()
+        db_exec("INSERT OR IGNORE INTO bans VALUES (?)", (uid,))
 
-        await m.answer(f"⛔ забанен {uid}")
+        await safe_send(m, f"⛔ забанен {uid}")
 
 
-# ================= WEBHOOK =================
+# ================= WEBHOOK (ANTI CRASH) =================
 
 async def handle(request):
-    data = await request.json()
-    update = types.Update.model_validate(data)
-    await dp.feed_update(bot, update)
+    try:
+        data = await request.json()
+        update = types.Update.model_validate(data)
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        print("WEBHOOK ERROR:", e)
+
     return web.Response(text="ok")
 
 
@@ -223,6 +263,7 @@ async def on_startup(app):
 app = web.Application()
 app.router.add_post("/webhook", handle)
 app.on_startup.append(on_startup)
+
 
 if __name__ == "__main__":
     web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
